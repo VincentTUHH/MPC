@@ -36,3 +36,43 @@ def animate_trajectory(all_links, fps=50):
     ani = FuncAnimation(fig, update, frames=timesteps, interval=1000/fps, blit=True)
     plt.legend()
     plt.show()
+
+def plot_tracking_errors(pos_error, att_error):
+    fig, axs = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    axs[0].plot(pos_error, label='Position Tracking Error')
+    axs[0].set_ylabel('Position Error [m]')
+    axs[0].legend()
+    axs[0].grid(True)
+
+    axs[1].plot(att_error, label='Attitude Tracking Error')
+    axs[1].set_ylabel('Attitude Error')
+    axs[1].set_xlabel('Timestep')
+    axs[1].legend()
+    axs[1].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_eef_positions(ref_eef_positions, eef_positions):
+    fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    labels = ['x', 'y', 'z']
+    for i in range(3):
+        axs[i].plot(ref_eef_positions[:, i], label='Reference')
+        axs[i].plot(eef_positions[:, i], label='Actual')
+        axs[i].set_ylabel(f'EEF {labels[i]} [m]')
+        axs[i].legend()
+        axs[i].grid(True)
+    axs[2].set_xlabel('Timestep')
+    plt.tight_layout()
+    plt.show()
+
+def plot_prediction_error(predErr):
+    plt.figure(figsize=(10, 4))
+    plt.plot(predErr[0, :], label='Prediction Error')
+    plt.xlabel('Timestep')
+    plt.ylabel('Prediction Error')
+    plt.title('Prediction Error over Time')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
