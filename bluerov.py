@@ -301,53 +301,96 @@ def generate_circle_trajectory(radius=1.0, center=np.array([0.0, 0.0, -1.0]), nu
     traj = np.stack([x, y, z, phi, theta_angle, psi], axis=1)
     return traj
 
-
-def generate_sine_on_circle_trajectory(
+def generate_circle_trajectory_time(
     radius=1.0,
     center=np.array([0.0, 0.0, -1.0]),
-    num_points=500,
-    sine_amplitude=0.5,
-    sine_wavelength=2 * np.pi / 5,
-    sine_phase=0.0
+    dt=0.01,
+    T=10.0,
+    n=1
 ):
     """
-    Generates a trajectory where the path is a circle in the XY plane,
-    but the Z coordinate oscillates as a sine wave around the circle.
-    The vehicle's x-axis is tangent to the trajectory.
+    Generates a circular trajectory in the XY plane at a fixed Z height,
+    parameterized by time, with the vehicle's x-axis tangential to the circle.
 
     Args:
         radius: float, radius of the circle (meters)
         center: np.array, center of the circle [x, y, z]
-        num_points: int, number of trajectory points
-        sine_amplitude: float, amplitude of the sine wave in Z (meters)
-        sine_wavelength: float, wavelength of the sine wave (radians)
-        sine_phase: float, phase offset for the sine wave (radians)
+        dt: float, time step (seconds)
+        T: float, period of one full circle (seconds)
+        n: int, number of circles to perform
 
     Returns:
-        traj: np.array, shape (num_points, 6), each row is [x, y, z, phi, theta, psi]
+        traj: np.array, shape (num_steps, 6), each row is [x, y, z, phi, theta, psi]
     """
-    theta = np.linspace(0, 2 * np.pi, num_points, endpoint=False)
+    num_steps_per_circle = int(np.round(T / dt))
+    t = np.tile(np.linspace(0, T, num_steps_per_circle, endpoint=False), n)
+    theta = 2 * np.pi * (t / T)
     x = center[0] + radius * np.cos(theta)
     y = center[1] + radius * np.sin(theta)
-    z = center[2] + sine_amplitude * np.sin(theta / sine_wavelength + sine_phase)
+    z = np.full_like(x, center[2])
     phi = np.zeros_like(x)
     theta_angle = np.zeros_like(x)
+    psi = theta + np.pi / 2  # Heading tangent to the path
 
-    # Compute heading tangent to the trajectory (psi)
-    dx = -radius * np.sin(theta)
-    dy = radius * np.cos(theta)
-    dz = (sine_amplitude / sine_wavelength) * np.cos(theta / sine_wavelength + sine_phase)
-    # Tangent vector
+    traj = np.stack([x, y, z, phi, theta_angle, psi], axis=1)
+    return traj
+
+
+def generate_sine_on_circle_trajectory_time(
+    radius=1.0,
+    center=np.array([0.0, 0.0, -1.0]),
+    dt=0.01,
+    T=10.0,
+    sine_amplitude=0.5,
+    sine_phase=0.0,
+    n=3
+):
+    """
+    Generates a seamless time-dependent trajectory: 
+    - XY is a circle with period T,
+    - Z is a sine with period T (so one up/down per circle),
+    - Heading (psi) is tangent to the path,
+    - Pitch (theta) follows the slope of the path,
+    - Roll (phi) is always zero (no roll).
+
+    Args:
+        radius: float, radius of the circle (meters)
+        center: np.array, center of the circle [x, y, z]
+        dt: float, time step (seconds)
+        T: float, period of one full circle (seconds)
+        sine_amplitude: float, amplitude of the sine wave in Z (meters)
+        sine_phase: float, phase offset for the sine wave (radians)
+        n: int, number of circles to perform
+
+    Returns:
+        traj: np.array, shape (num_steps, 6), each row is [x, y, z, phi, theta, psi]
+    """
+    num_steps_per_circle = int(np.round(T / dt))
+    t = np.tile(np.linspace(0, T, num_steps_per_circle, endpoint=False), n)
+    theta_circ = 2 * np.pi * (t / T)  # angle around the circle, period T
+
+    # XY circle
+    x = center[0] + radius * np.cos(theta_circ)
+    y = center[1] + radius * np.sin(theta_circ)
+    # Z sine, period T
+    z = center[2] + sine_amplitude * np.sin(theta_circ + sine_phase)
+    phi = np.zeros_like(x)  # no roll
+
+    # Derivatives for tangent vector
+    dtheta_dt = 2 * np.pi / T
+    dx = -radius * np.sin(theta_circ) * dtheta_dt
+    dy =  radius * np.cos(theta_circ) * dtheta_dt
+    dz = sine_amplitude * np.cos(theta_circ + sine_phase) * dtheta_dt
+
     tangent = np.stack([dx, dy, dz], axis=1)
-    # Normalize tangent for heading calculation
     tangent_norm = np.linalg.norm(tangent, axis=1, keepdims=True)
     tangent_unit = tangent / tangent_norm
 
-    # psi: heading in XY plane (arctan2 of dy, dx)
+    # Heading: tangent in XY plane
     psi = np.arctan2(tangent_unit[:, 1], tangent_unit[:, 0])
-
-    # theta_angle: pitch angle (angle between tangent and XY plane)
+    # Pitch: angle of tangent vector with respect to horizontal
     theta_angle = np.arcsin(tangent_unit[:, 2])
+    # Roll: always zero
 
     traj = np.stack([x, y, z, phi, theta_angle, psi], axis=1)
     return traj
@@ -381,13 +424,13 @@ def main():
     for t in range(timesteps):
         nu_all[t+1, :], eta_all[t+1, :], _ = forward_dynamics(dynamics, tau[t,:], nu_all[t, :], eta_all[t, :], dt)
 
-    animate_bluerov(eta_all)
+    animate_bluerov(eta_all, dt = dt)
 
     traj = generate_circle_trajectory()
-    animate_bluerov(traj)
+    animate_bluerov(traj, dt = dt)
 
-    traj = generate_sine_on_circle_trajectory()
-    animate_bluerov(traj)
+    traj = generate_sine_on_circle_trajectory_time(dt = dt, T = 10.0)
+    animate_bluerov(traj, dt = dt)
 
     eta_all = np.zeros((timesteps + 1, 6))  # Store poses
     nu_all = np.zeros((timesteps + 1, 6))  # Store velocities
@@ -409,7 +452,7 @@ def main():
     for t in range(timesteps):
         nu_all[t+1, :], eta_all[t+1, :], _, tau_all[t,:] = forward_dynamics_esc(dynamics, u_esc, nu_all[t, :], eta_all[t, :], dt, V_bat)
 
-    animate_bluerov(eta_all)
+    animate_bluerov(eta_all, dt = dt)
 
     print('Tau all:', tau_all[0,:])
 

@@ -66,6 +66,8 @@ def plot_eef_positions(ref_eef_positions, eef_positions):
     axs[2].set_xlabel('Timestep')
     plt.tight_layout()
 
+
+
 def plot_prediction_error(predErr):
     plt.figure(figsize=(10, 4))
     plt.plot(predErr[0, :], label='Prediction Error')
@@ -88,7 +90,15 @@ def plot_joint_angles(q_traj):
     plt.tight_layout()
 
 
-def animate_bluerov(eta_all, box_size=(0.4571, 0.575, 0.2539)):
+def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
+    '''Animate the trajectory of a BlueROV vehicle in 3D space.
+    Parameters:
+    - eta_all: np.ndarray of shape (n_steps, 6) containing the state
+      [x, y, z, phi, theta, psi] for each timestep.
+    - dt: float, time step duration in seconds.
+    - box_size: tuple of floats (length, width, height) representing the
+      dimensions of the vehicle's bounding box.
+    '''
     
     def plot_vehicle(ax, eta, box_size):
         pos = eta[:3]
@@ -148,7 +158,20 @@ def animate_bluerov(eta_all, box_size=(0.4571, 0.575, 0.2539)):
         ax.set_ylabel('Y')
         ax.set_zlabel('Z')
         plot_vehicle(ax, eta_all[frame], box_size=box_size)
-        ax.set_title(f"Step {frame}")
+        ax.set_title(f"Step {frame} (t={frame*dt:.2f}s)")
 
-    ani = FuncAnimation(fig, update, frames=eta_all.shape[0], interval=100)
+    ani = FuncAnimation(fig, update, frames=eta_all.shape[0], interval=dt*1000)
     plt.show()
+    
+
+def plot_vehicle_pos_vs_reference(ref_positions, real_positions):
+    fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    labels = ['x', 'y', 'z']
+    for i in range(3):
+        axs[i].plot(ref_positions[:, i], label='Reference')
+        axs[i].plot(real_positions[:, i], label='Actual')
+        axs[i].set_ylabel(f'EEF {labels[i]} [m]')
+        axs[i].legend()
+        axs[i].grid(True)
+    axs[2].set_xlabel('Timestep')
+    plt.tight_layout()
