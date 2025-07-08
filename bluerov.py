@@ -289,7 +289,7 @@ def generate_circle_trajectory(radius=1.0, center=np.array([0.0, 0.0, -1.0]), nu
     Returns:
         traj: np.array, shape (num_points, 6), each row is [x, y, z, phi, theta, psi]
     """
-    theta = np.linspace(0, 2 * np.pi, num_points, endpoint=False)
+    theta = np.linspace(-np.pi, np.pi, num_points, endpoint=False)
     x = center[0] + radius * np.cos(theta)
     y = center[1] + radius * np.sin(theta)
     z = np.full_like(x, center[2])
@@ -324,7 +324,7 @@ def generate_circle_trajectory_time(
     """
     num_steps_per_circle = int(np.round(T / dt))
     t = np.tile(np.linspace(0, T, num_steps_per_circle, endpoint=False), n)
-    theta = 2 * np.pi * (t / T)
+    theta = - 2 * np.pi * (t / T)
     x = center[0] + radius * np.cos(theta)
     y = center[1] + radius * np.sin(theta)
     z = np.full_like(x, center[2])
@@ -393,6 +393,54 @@ def generate_sine_on_circle_trajectory_time(
     # Roll: always zero
 
     traj = np.stack([x, y, z, phi, theta_angle, psi], axis=1)
+    return traj
+
+
+def generate_linear_trajectory(start, end, T, dt):
+    """
+    Generates a straight-line trajectory from start to end with constant speed,
+    covering the distance in time T. The orientation is chosen such that the x-axis
+    points in the direction of the trajectory and the y-axis is parallel to the horizontal plane.
+
+    Args:
+        start: np.array, shape (3,), start position [x, y, z]
+        end: np.array, shape (3,), end position [x, y, z]
+        T: float, total time to traverse (seconds)
+        dt: float, time step (seconds)
+
+    Returns:
+        traj: np.array, shape (num_steps, 6), each row is [x, y, z, phi, theta, psi]
+    """
+    num_steps = int(np.round(T / dt)) + 1
+    positions = np.linspace(start, end, num_steps)
+
+    # Direction vector
+    direction = end - start
+    direction_norm = np.linalg.norm(direction)
+    if direction_norm < 1e-8:
+        # No movement, keep orientation zero
+        phi = theta = psi = 0.0
+    else:
+        # Normalize direction
+        dir_unit = direction / direction_norm
+        # Yaw (psi): angle in XY plane
+        psi = np.arctan2(dir_unit[1], dir_unit[0])
+        # Pitch (theta): angle up/down from horizontal
+        theta = np.arctan2(-dir_unit[2], np.hypot(dir_unit[0], dir_unit[1]))
+        # Roll (phi): keep zero to keep y-axis horizontal
+        phi = 0.0
+
+    # Repeat orientation for all steps
+    # orientation = np.tile([phi, theta, psi], (num_steps, 1))
+    # traj = np.hstack([positions, orientation])
+
+    # Create arrays for orientation with the same length as positions
+    phi_arr = np.full((num_steps,), phi)
+    theta_arr = np.full((num_steps,), theta)
+    psi_arr = np.full((num_steps,), psi)
+
+    traj = np.hstack([positions, phi_arr[:, None], theta_arr[:, None], psi_arr[:, None]])
+
     return traj
 
 def main():

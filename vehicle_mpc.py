@@ -147,7 +147,7 @@ def skew_symmetric_symbolic(v):
 
 def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, dt, use_pwm=False, V_bat=16.0):
     M = int(T_trajectory / dt)  # total number of timesteps
-    N = 3  # horizon length for the MPC
+    N = 20  # horizon length for the MPC
     n_dof = 6  # number of degrees of freedom for the BlueROV
     n_thruster = 8  # number of thrusters
 
@@ -158,14 +158,22 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
         u_optimal = np.zeros((n_dof, M))  # optimal control inputs
     cost = np.zeros(M)  # cost for each step
     q_real = np.zeros((2 * n_dof, M + 1))  # real
+    jacobian_array = np.zeros(M)
     
     q_real[0:6, 0] = reference_trajectory[:, 0]  # initial state
     # q_real[6:, 0] = np.zeros(n_dof)  # initial twist (zero)
     # Estimate initial twist (velocity) guess from reference trajectory
-    initial_twist_guess = (reference_trajectory[:, 1] - reference_trajectory[:, 0]) / dt
+    if reference_trajectory.shape[1] >= 3:
+        initial_twist_guess = (reference_trajectory[:, 2] - reference_trajectory[:, 0]) / (2 * dt)
+    else:
+        initial_twist_guess = (reference_trajectory[:, 1] - reference_trajectory[:, 0]) / dt
+    # initial_twist_guess = (reference_trajectory[:, 1] - reference_trajectory[:, 0]) / dt
     q_real[6:, 0] = initial_twist_guess
 
     start_time = time.time()  # Startzeit MPC messen
+
+    if use_pwm:
+        u0 = np.full((n_thruster, N), 0.2)  # initial guess for PWM commands, all entries set to 0.5 (normalized [-1, 1])
 
     for step in range(M):
         # Ensure reference_trajectory for the horizon has N columns (pad with last column if needed)
@@ -176,12 +184,13 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
             ref_traj_horizon = np.concatenate([ref_traj_horizon, pad], axis=1)
 
         if use_pwm:
-            q_opt, u_optimal_horizon, Jopt = solve_cftoc_pwm(N, n_dof, symbolic_bluerov, q_real[6:, step], q_real[0:6, step], ref_traj_horizon, dt, n_thruster, V_bat)
+            q_opt, u_optimal_horizon, Jopt = solve_cftoc_pwm(N, n_dof, symbolic_bluerov, q_real[6:, step], q_real[0:6, step], ref_traj_horizon, dt, u0, n_thruster, V_bat)
         else:
             q_opt, u_optimal_horizon, Jopt = solve_cftoc_tau(N, n_dof, symbolic_bluerov, q_real[6:, step], q_real[0:6, step], ref_traj_horizon, dt)
 
         q_predict[:, :, step] = q_opt
         u_optimal[:, step] = u_optimal_horizon[:, 0] # this mpc solves for tau as control input
+        u0 = np.hstack([u_optimal_horizon[:, 1:], u_optimal_horizon[:, -1][:, np.newaxis]])  # shift all values left and repeat the last one
         cost[step] = Jopt
         if use_pwm:
             # in real die u_ESC commands noch umrechnen von PWM [-1, 1] auf tau [1100, 1900]
@@ -189,8 +198,21 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
         else:
             q_real[6:, step + 1], q_real[0:6, step + 1], _ = bluerov.forward_dynamics(real_bluerov, tau = u_optimal[:, step], nu = q_real[6:, step], eta = q_real[0:6, step], dt = dt)
 
+        jacobian = bluerov.rigid_body_jacobian_euler(q_real[0:6, step+1])
+        jacobian_array[step] = np.linalg.cond(jacobian)
+
     elapsed_time = time.time() - start_time  # Benötigte Zeit berechnen
     print(f"MPC completed in {elapsed_time:.2f} seconds")
+
+    import matplotlib.pyplot as plt
+
+    plt.figure()
+    plt.plot(np.arange(jacobian_array.shape[0]) * dt, jacobian_array)
+    plt.xlabel('Time [s]')
+    plt.ylabel('Jacobian Condition Number')
+    plt.title('Jacobian Condition Number over Time')
+    plt.grid(True)
+    plt.show()
 
     return q_real, cost, u_optimal
 
@@ -231,8 +253,17 @@ def solve_cftoc_tau(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
 
         cost += ca.sumsqr(pos_error) + ca.sumsqr(att_error)
 
+    opti.callback(lambda: print("Current cost:", opti.debug.value(cost)))
+
     opti.minimize(cost)
-    sol = opti.solve()
+
+    try:
+        sol = opti.solve()
+    except RuntimeError:
+        print("Infeasible. Checking debug values...")
+        print("q0:", opti.debug.value(q[:, 0]))
+        print("u0:", opti.debug.value(u[:, 0]))
+
     return sol.value(q), sol.value(u), sol.value(cost)
 
 
@@ -251,17 +282,28 @@ def euler_to_quat_casadi(roll, pitch, yaw):
     z = cr * cp * sy - sr * sp * cy
     return [w, x, y, z]
 
-def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory, dt, n_thruster=8, V_bat=16.0):
+def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory, dt, u0, n_thruster=8, V_bat=16.0):
     opti = ca.Opti()
     opts = {'ipopt.print_level': 0, 'print_time': 0}
+    # opts = {'ipopt.print_level': 5, 'print_time': 1, 'ipopt.tol': 1e-4}
     # opts = {}
     opti.solver('ipopt', opts)
 
     q = opti.variable(2 * n_dof, N + 1)  # vehicle pose (with euler angles) eta and twist nu
     u = opti.variable(n_thruster, N)  # thruster PWM commands (normalized [-1, 1])
 
+    # slack variables to soften the constraints
+    # solver can violate the constraint slightly, but it will be penalized heavily in the cost.
+    # pitch_slack = opti.variable()
+    # opti.subject_to(pitch_slack >= 0)
+    # dynamic_slack = opti.variable(n_dof)
+    # opti.subject_to(dynamic_slack >= 0)
+    # u_slack = opti.variable()
+    # opti.subject_to(u_slack >= 0)
+
+
     opti.set_initial(q, ca.repmat(ca.vertcat(eta0, nu0), 1, N + 1))
-    opti.set_initial(u, 0.5 * ca.DM.ones(n_thruster, N))
+    opti.set_initial(u, u0)
 
     opti.subject_to(q[0:6, 0] == ca.DM(eta0))  # initial pose
     opti.subject_to(q[6:, 0] == ca.DM(nu0))  # initial twist
@@ -270,22 +312,71 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
         for thruster in range(n_thruster):
             opti.subject_to(u[thruster, k] <= 1.0)
             opti.subject_to(u[thruster, k] >= -1.0)
+            # opti.subject_to(u[thruster, k] <= 1.0 + u_slack)
+            # opti.subject_to(u[thruster, k] >= -1.0 - u_slack)
 
-        opti.subject_to(q[3, k] >= -np.pi * 3 / 4)  # phi should be in [-pi/2, pi/2] (roll)
-        opti.subject_to(q[3, k] <= np.pi * 3 / 4)
-        opti.subject_to(q[4, k] >= -np.pi * 3 /4)  # theta should be in [-pi/2, pi/2] (pitch)
-        opti.subject_to(q[4, k] <= np.pi * 3 / 4)
+        # opti.subject_to(q[3, k] >= -np.pi * 3 / 4)  # phi should be in [-pi/2, pi/2] (roll)
+        # opti.subject_to(q[3, k] <= np.pi * 3 / 4)
+        # opti.subject_to(q[4, k] >= -np.pi * 85 /180 - pitch_slack)  # theta (pitch) should be in [-85°, 85°] to avoid gimbal lock (for zyx Euler config) at +-90°, 
+        # opti.subject_to(q[4, k] <= np.pi * 85 / 180 + pitch_slack)  # thus singularities in J, when 1/cos(theta) would blow up
 
         # vehcile dynamics
-        opti.subject_to(q[6:, k+1] == q[6:, k] + dt * ca.mtimes(symbolic_bluerov.M_inv, (symbolic_bluerov.L * ca.DM(V_bat) * ca.mtimes(symbolic_bluerov.mixer, u[:, k]) - ca.mtimes(symbolic_bluerov.C(q[6:, k]), q[6:, k]) - ca.mtimes(symbolic_bluerov.D(q[6:, k]), q[6:, k]) - symbolic_bluerov.g(q[0:6, k]))))
-        # vehicle kinematics
-        opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * ca.mtimes(symbolic_bluerov.J(q[0:6,k]), q[6:, k+1]))
+        # opti.subject_to(q[6:, k+1] == q[6:, k] + dt * ca.mtimes(symbolic_bluerov.M_inv, (symbolic_bluerov.L * ca.DM(V_bat) * ca.mtimes(symbolic_bluerov.mixer, u[:, k]) - ca.mtimes(symbolic_bluerov.C(q[6:, k]), q[6:, k]) - ca.mtimes(symbolic_bluerov.D(q[6:, k]), q[6:, k]) - symbolic_bluerov.g(q[0:6, k]))))
+        tau = symbolic_bluerov.L * ca.DM(V_bat) * symbolic_bluerov.mixer @ u[:, k]
+        nu_dot = symbolic_bluerov.M_inv @ (tau - symbolic_bluerov.C(q[6:, k]) @ q[6:, k] - symbolic_bluerov.D(q[6:, k]) @ q[6:, k] - symbolic_bluerov.g(q[0:6, k]))
+        opti.subject_to(q[6:, k+1] == q[6:, k] + dt * nu_dot)
 
+        
+        # vehicle kinematics
+        # opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * ca.mtimes(symbolic_bluerov.J(q[0:6,k]), q[6:, k])) # explicit Euler integration for the kinematics
+        # opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * ca.mtimes(symbolic_bluerov.J(q[0:6,k]), q[6:, k+1])) # implicit Euler integration for the kinematics
+        opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * symbolic_bluerov.J(q[:, k]) @ q[6:, k])
+
+        # # RK4 integration for the kinematics
+        # eta_k = q[0:6, k]
+        # nu_k = q[6:, k]
+        # # k1
+        # k1 = symbolic_bluerov.J(eta_k) @ nu_k
+        # # k2
+        # k2 = symbolic_bluerov.J(eta_k + 0.5 * dt * k1) @ nu_k
+        # # k3
+        # k3 = symbolic_bluerov.J(eta_k + 0.5 * dt * k2) @ nu_k
+        # # k4
+        # k4 = symbolic_bluerov.J(eta_k + dt * k3) @ nu_k
+        # eta_next = eta_k + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        # opti.subject_to(q[0:6, k+1] == eta_next)
 
 
     cost = 0
 
+    # attitude error weighting
+    q_weight_att = 5.0
+    Q_att = q_weight_att * ca.diag(ca.DM([1.0, 1.0, 2.0])) # penelize yaw more than roll and pitch
+    # position error weighting
+    q_weight_pos = 5.0
+    Q_pos = q_weight_pos * ca.diag(ca.DM([1.0, 1.0, 1.0]))
+    # control input weighting  
+    u_weight = ca.DM(0.001)
+    R_input = u_weight * ca.DM.eye(n_thruster)
+    # control input change weighting  
+    u_weight_change = ca.DM(0.001)
+    R_change = u_weight_change * ca.DM.eye(n_thruster)
+    # penalized_thrusters = [4, 5, 6, 7]
+    # R_change = ca.DM.eye(n_thruster) * 0.0
+    # for i in penalized_thrusters:
+    #     R_change[i, i] = u_weight_change
+
+    Q_nu = 0.00001 * ca.DM.eye(n_dof)  # Tune as needed
+
+
     def quaternion_error(q_goal, q_current):
+            # axis-angle representation
+            # vector encodes the shortest rotation required to align q_current to q_goal
+            # not aligned with roll, pitch, and yaw
+            # axis of rotation (direction of att_error)
+            # magnitude of rotation (‖att_error‖)
+            # though the entries do not match roll, pitch, yaw, weighting the third entry does emphazize the yaw error
+            # as for small angles the axis-angle representation is equivalent to the Euler angles
             w_g = q_goal[0]
             x_g = q_goal[1]
             y_g = q_goal[2]
@@ -321,11 +412,54 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
 
         pos_error = ca.DM(reference_trajectory[0:3, k]) - pos_k
         # att_error = ca.DM(reference_trajectory[3:6, k]) - att_k # with singularities might not be correct
+        
+        cost += ca.mtimes([pos_error.T, Q_pos, pos_error])
+        cost += ca.mtimes([att_error.T, Q_att, att_error])
+        cost += ca.mtimes([u[:, k].T, R_input, u[:, k]])
+        # cost += ca.mtimes([q[6:, k].T, Q_nu, q[6:, k]])  # Terminal cost for the twist (velocity)
 
-        cost += ca.sumsqr(pos_error) + ca.sumsqr(att_error)
+    # Effort smoothness / chnage of control inputs
+    delta_u = u[:, 1:] - u[:, :-1]
+    for k in range(N - 1):  # not N!
+        cost += ca.mtimes([delta_u[:, k].T, R_change, delta_u[:, k]])
 
+
+
+    # Terminal cost
+    # pos_error_N = ca.DM(reference_trajectory[0:3, N-1]) - q[0:3, N]
+    # att_k_N = q[3:6, N]
+    # ref_quat_N = euler_to_quat_casadi(reference_trajectory[3, N-1], reference_trajectory[4, N-1], reference_trajectory[5, N-1])
+    # curr_quat_N = euler_to_quat_casadi(att_k_N[0], att_k_N[1], att_k_N[2])
+    # att_error_N = quaternion_error(ref_quat_N, curr_quat_N)
+
+    # cost += ca.mtimes([pos_error_N.T, Q_pos, pos_error_N])
+    # cost += ca.mtimes([att_error_N.T, Q_att, att_error_N])
+
+    
+
+
+    # slack variable cost
+    # cost += 1e4 * ca.sumsqr(pitch_slack)
+    # # cost += 1e3 * ca.sumsqr(dynamic_slack)
+    # cost += 1e4 * ca.sumsqr(u_slack)
+    
+    opti.callback(lambda _: print("Current cost:", opti.debug.value(cost)))
     opti.minimize(cost)
-    sol = opti.solve()
+
+    try:
+        sol = opti.solve()
+        print("Value of pos_error:", opti.debug.value(pos_error))
+    except RuntimeError:
+        print("Infeasible. Checking debug values...")
+        
+        print("q0:", opti.debug.value(q[:, 0]))
+        print("u0:", opti.debug.value(u[:, 0]))
+        print("Initial cost estimate:", opti.debug.value(cost))
+
+    # print("Solver stats:", opti.stats())
+    for k in range(N):
+        print(f"u[:, {k}] =", sol.value(u[:, k]))
+
     return sol.value(q), sol.value(u), sol.value(cost)
 
 
@@ -336,27 +470,21 @@ def main():
     bluerov_dynamics = bluerov.BlueROVDynamics(bluerov_params)
     bluerov_symbolic = BlueROVDynamicsSymbolic(bluerov_params)
 
-    T = 10.0  # seconds for one period of the sine wave trajectory
-    fps = 50  # frames per second
+    T = 20.0  # seconds for one period of the sine wave trajectory
+    fps = 20  # frames per second
     dt = 1 / fps  # seconds
     n = 1  # number of periods for the sine wave trajectory
 
-    reference_eta = bluerov.generate_sine_on_circle_trajectory_time(T=T, dt = dt, n=n)
+    # reference_eta = bluerov.generate_sine_on_circle_trajectory_time(T=T, dt = dt, n=n)
 
-    # reference_eta = bluerov.generate_circle_trajectory_time(T=T, dt=dt, n=n)
+    reference_eta = bluerov.generate_circle_trajectory_time(T=T, dt=dt, n=n)
 
-    # eta_0 = np.array([0, 0, -1.0, 0.0, 0.0, 0])  # Initial pose [x, y, z, phi, theta, psi]
-    # nu_0 = np.array([0, 0, 0, 0, 0, 0])  # Initial velocity [u, v, w, p, q, r]
-    # tau = np.array([-5.37, 0, 0, 0, 0, 0])  # exemplary wrench on the vehicle
-
-    # eta_all = np.zeros((timesteps + 1, 6))  # Store poses
-    # nu_all = np.zeros((timesteps + 1, 6))  # Store velocities
-
-    # eta_all[0, :] = eta_0
-    # nu_all[0, :] = nu_0
-
-    # for t in range(timesteps):
-    #     nu_all[t+1, :], eta_all[t+1, :], _ = bluerov.forward_dynamics(bluerov_dynamics, tau[t,:], nu_all[t, :], eta_all[t, :], dt)
+    # start = np.array([0.0, 0.0, -1.0])  # [x, y, z, roll, pitch, yaw]
+    # end = np.array([1.0, 2.0, -1.0])
+    # reference_eta = bluerov.generate_linear_trajectory(start, end, T, dt)
+    # n=1
+    # print("Reference trajectory shape:", reference_eta)
+    # return None
 
     ##################################
     # Ich habe geändert, dass dt = 1 /fps und nicht T/fps ist
@@ -375,6 +503,21 @@ def main():
     real_nu = real_traj[6:, :].T
 
     import matplotlib.pyplot as plt
+
+    # Plot the change of u_optimal (delta u) over time
+    plt.figure()
+    delta_u = np.diff(u_optimal, axis=1)
+    for i in range(delta_u.shape[0]):
+        plt.subplot(delta_u.shape[0], 1, i + 1)
+        plt.plot(np.arange(delta_u.shape[1]) * dt, delta_u[i, :])
+        plt.ylabel(f'Δu[{i}]')
+        if i == 0:
+            plt.title('Change of Control Inputs (delta u) over Time')
+        if i == delta_u.shape[0] - 1:
+            plt.xlabel('Time [s]')
+        plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
     plt.figure()
     plt.plot(np.arange(cost.shape[0]) * dt, cost)
