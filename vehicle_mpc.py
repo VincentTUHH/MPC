@@ -283,72 +283,179 @@ def euler_to_quat_casadi(roll, pitch, yaw):
     return [w, x, y, z]
 
 def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory, dt, u0, n_thruster=8, V_bat=16.0):
+    # Integrator selection dictionary
+    integrator_dict = {
+        0: 'explicit_euler',
+        1: 'rk4_coupled_coordinates', # improves slightly over explicit euler, but sloooooow
+        2: 'rk4_decoupled_coordinates',
+        3: 'CasADi_integrator' # Lösung ergibt überhaupt keinen Sinn
+    }
+    integrator = integrator_dict.get(3)  # Change the key to select the integrator
+    ####################################################################################
+    ####################################################################################
+    ################################### Optimizer ######################################
+    ####################################################################################
+    ####################################################################################
+
+    ##########################################
+    ################ solver ##################
+    ##########################################
     opti = ca.Opti()
-    opts = {'ipopt.print_level': 0, 'print_time': 0}
-    # opts = {'ipopt.print_level': 5, 'print_time': 1, 'ipopt.tol': 1e-4}
+    # opts = {'ipopt.print_level': 0, 'print_time': 0}
+    opts = {'ipopt.print_level': 5, 'print_time': 1, 'ipopt.tol': 1e-4}
+    # opts = {"ipopt.print_level": 5,
+    #     "print_time": True,
+    #     "ipopt.sb": "yes",
+    #     "ipopt.tol": 1e-6}
     # opts = {}
     opti.solver('ipopt', opts)
 
+    ##########################################
+    ########### state variables ##############
+    ##########################################
     q = opti.variable(2 * n_dof, N + 1)  # vehicle pose (with euler angles) eta and twist nu
     u = opti.variable(n_thruster, N)  # thruster PWM commands (normalized [-1, 1])
 
+    ##########################################
+    ########### slack variables ##############
+    ##########################################
     # slack variables to soften the constraints
-    # solver can violate the constraint slightly, but it will be penalized heavily in the cost.
+    # solver can violate the constraint slightly, but it will be penalized heavily in the cost
+    # epsilon_terminal = opti.variable(n_dof)
+    # epsilon_initial = opti.variable(2 * n_dof)
+
+    u_slack = opti.variable()
+    opti.subject_to(u_slack >= 0)
+
     # pitch_slack = opti.variable()
     # opti.subject_to(pitch_slack >= 0)
     # dynamic_slack = opti.variable(n_dof)
     # opti.subject_to(dynamic_slack >= 0)
-    # u_slack = opti.variable()
-    # opti.subject_to(u_slack >= 0)
-
-
-    opti.set_initial(q, ca.repmat(ca.vertcat(eta0, nu0), 1, N + 1))
+    
+    ##########################################
+    ############ initial guess ###############
+    ##########################################
+    q_init = np.tile(np.concatenate([np.array(eta0).flatten(), np.array(nu0).flatten()]), (N + 1, 1)).T
+    opti.set_initial(q, q_init)
     opti.set_initial(u, u0)
 
-    opti.subject_to(q[0:6, 0] == ca.DM(eta0))  # initial pose
-    opti.subject_to(q[6:, 0] == ca.DM(nu0))  # initial twist
+    ##########################################
+    ##### function for CasADi integrator #####
+    ##########################################
+    x_int = ca.MX.sym('x_int', 2 * n_dof)  # eta (6) + nu (6)
+    u_int = ca.MX.sym('u_int', n_thruster)
 
+    eta = x_int[0:6]
+    nu = x_int[6:12]
+
+    tau = symbolic_bluerov.L * V_bat * (symbolic_bluerov.mixer @ u_int)
+    nu_dot = symbolic_bluerov.M_inv @ (tau - symbolic_bluerov.C(nu) @ nu - symbolic_bluerov.D(nu) @ nu - symbolic_bluerov.g(eta))
+    eta_dot = symbolic_bluerov.J(eta) @ nu
+
+    xdot = ca.vertcat(eta_dot, nu_dot)
+    ode = {'x': x_int, 'p': u_int, 'ode': xdot}
+
+    integrator = ca.integrator('integrator', 'cvodes', ode, {'tf': dt})
+
+    ####################################################################################
+    ####################################################################################
+    ################################## Constraints #####################################
+    ####################################################################################
+    ####################################################################################
     for k in range(N):
+        ##########################################
+        ######## control input constraint ########
+        ##########################################
         for thruster in range(n_thruster):
-            opti.subject_to(u[thruster, k] <= 1.0)
-            opti.subject_to(u[thruster, k] >= -1.0)
-            # opti.subject_to(u[thruster, k] <= 1.0 + u_slack)
-            # opti.subject_to(u[thruster, k] >= -1.0 - u_slack)
+            # opti.subject_to(u[thruster, k] <= 1.0)
+            # opti.subject_to(u[thruster, k] >= -1.0)
+            opti.subject_to(u[thruster, k] <= 1.0 + u_slack)
+            opti.subject_to(u[thruster, k] >= -1.0 - u_slack)
 
+        ##########################################
+        ############ state constraint ############
+        ##########################################
         # opti.subject_to(q[3, k] >= -np.pi * 3 / 4)  # phi should be in [-pi/2, pi/2] (roll)
         # opti.subject_to(q[3, k] <= np.pi * 3 / 4)
         # opti.subject_to(q[4, k] >= -np.pi * 85 /180 - pitch_slack)  # theta (pitch) should be in [-85°, 85°] to avoid gimbal lock (for zyx Euler config) at +-90°, 
         # opti.subject_to(q[4, k] <= np.pi * 85 / 180 + pitch_slack)  # thus singularities in J, when 1/cos(theta) would blow up
 
-        # vehcile dynamics
-        # opti.subject_to(q[6:, k+1] == q[6:, k] + dt * ca.mtimes(symbolic_bluerov.M_inv, (symbolic_bluerov.L * ca.DM(V_bat) * ca.mtimes(symbolic_bluerov.mixer, u[:, k]) - ca.mtimes(symbolic_bluerov.C(q[6:, k]), q[6:, k]) - ca.mtimes(symbolic_bluerov.D(q[6:, k]), q[6:, k]) - symbolic_bluerov.g(q[0:6, k]))))
-        tau = symbolic_bluerov.L * ca.DM(V_bat) * symbolic_bluerov.mixer @ u[:, k]
-        nu_dot = symbolic_bluerov.M_inv @ (tau - symbolic_bluerov.C(q[6:, k]) @ q[6:, k] - symbolic_bluerov.D(q[6:, k]) @ q[6:, k] - symbolic_bluerov.g(q[0:6, k]))
-        opti.subject_to(q[6:, k+1] == q[6:, k] + dt * nu_dot)
+        ##########################################
+        ############ system equations ############
+        ##########################################
+        if integrator == 'explicit_euler':
+            # dynamics
+            tau = symbolic_bluerov.L * ca.DM(V_bat) * symbolic_bluerov.mixer @ u[:, k]
+            nu_dot = symbolic_bluerov.M_inv @ (tau - symbolic_bluerov.C(q[6:, k]) @ q[6:, k] - symbolic_bluerov.D(q[6:, k]) @ q[6:, k] - symbolic_bluerov.g(q[0:6, k]))
+            opti.subject_to(q[6:, k+1] == q[6:, k] + dt * nu_dot)
+            # kinematics
+            opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * symbolic_bluerov.J(q[:, k]) @ q[6:, k])
+        elif integrator == 'rk4_coupled_coordinates':
+            # combined kinematics and dynamics in one funtion f: x_dot = (eta_dot, nu_dot) = (kinematics, dynamics) = f(eta, nu, u) = f(x, u)
+            def f(x, u):
+                eta = x[0:6]
+                nu = x[6:12]
+                J_eta = symbolic_bluerov.J(eta)
+                tau = symbolic_bluerov.L * V_bat * (symbolic_bluerov.mixer @ u)
+                nu_dot = symbolic_bluerov.M_inv @ (tau - symbolic_bluerov.C(nu) @ nu - symbolic_bluerov.D(nu) @ nu - symbolic_bluerov.g(eta))
+                eta_dot = J_eta @ nu
+                return ca.vertcat(eta_dot, nu_dot)
+            x_k = q[:, k]
+            k1 = f(x_k, u[:, k])
+            k2 = f(x_k + 0.5 * dt * k1, u[:, k])
+            k3 = f(x_k + 0.5 * dt * k2, u[:, k])
+            k4 = f(x_k + dt * k3, u[:, k])
+            x_next = x_k + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+            opti.subject_to(q[:, k+1] == x_next)
+        elif integrator == 'rk4_decoupled_coordinates':
+            # dynamics
+            def f(nu, eta):
+                tau = symbolic_bluerov.L * V_bat * (symbolic_bluerov.mixer @ u[:, k])
+                return symbolic_bluerov.M_inv @ (tau - symbolic_bluerov.C(nu) @ nu - symbolic_bluerov.D(nu) @ nu - symbolic_bluerov.g(eta))
+            nu_k = q[6:12, k]
+            eta_k = q[0:6, k]
+            k1 = f(nu_k, eta_k)
+            k2 = f(nu_k + 0.5 * dt * k1, eta_k)
+            k3 = f(nu_k + 0.5 * dt * k2, eta_k)
+            k4 = f(nu_k + dt * k3, eta_k)
 
-        
-        # vehicle kinematics
-        # opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * ca.mtimes(symbolic_bluerov.J(q[0:6,k]), q[6:, k])) # explicit Euler integration for the kinematics
-        # opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * ca.mtimes(symbolic_bluerov.J(q[0:6,k]), q[6:, k+1])) # implicit Euler integration for the kinematics
-        opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * symbolic_bluerov.J(q[:, k]) @ q[6:, k])
+            nu_next = nu_k + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+            opti.subject_to(q[6:, k+1] == nu_next)
+            # kinematics
+            def f(eta):
+                return bluerov.J(eta) @ nu_k
+            k1 = f(eta_k)
+            k2 = f(eta_k + 0.5 * dt * k1)
+            k3 = f(eta_k + 0.5 * dt * k2)
+            k4 = f(eta_k + dt * k3)
 
-        # # RK4 integration for the kinematics
-        # eta_k = q[0:6, k]
-        # nu_k = q[6:, k]
-        # # k1
-        # k1 = symbolic_bluerov.J(eta_k) @ nu_k
-        # # k2
-        # k2 = symbolic_bluerov.J(eta_k + 0.5 * dt * k1) @ nu_k
-        # # k3
-        # k3 = symbolic_bluerov.J(eta_k + 0.5 * dt * k2) @ nu_k
-        # # k4
-        # k4 = symbolic_bluerov.J(eta_k + dt * k3) @ nu_k
-        # eta_next = eta_k + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
-        # opti.subject_to(q[0:6, k+1] == eta_next)
+            eta_next = eta_k + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+            opti.subject_to(q[0:6, k+1] == eta_next)
+        elif integrator == 'CasADi_integrator':
+            xk = q[:, k]
+            x_next = integrator(x0=xk, p=u[:, k])['xf']
+            opti.subject_to(q[:, k+1] == x_next)
 
+    ##########################################
+    ########## initial constraint ############
+    ##########################################
+    opti.subject_to(q[:, 0] == ca.vertcat(eta0, nu0))  # epsilon_initial ,   initial state (pose and twist)
 
+    ##########################################
+    ########## terminal constraint ###########
+    ##########################################
+    # opti.subject_to(q[0:6, N] == ca.DM(reference_trajectory[:, N-1]) + epsilon_terminal)
+
+    ####################################################################################
+    ####################################################################################
+    ################################# Cost function ####################################
+    ####################################################################################
+    ####################################################################################
     cost = 0
 
+    ##########################################
+    ################ weights #################
+    ##########################################
     # attitude error weighting
     q_weight_att = 5.0
     Q_att = q_weight_att * ca.diag(ca.DM([1.0, 1.0, 2.0])) # penelize yaw more than roll and pitch
@@ -356,92 +463,72 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
     q_weight_pos = 5.0
     Q_pos = q_weight_pos * ca.diag(ca.DM([1.0, 1.0, 1.0]))
     # control input weighting  
-    u_weight = ca.DM(0.001)
+    u_weight = ca.DM(0.0001)
     R_input = u_weight * ca.DM.eye(n_thruster)
     # control input change weighting  
-    u_weight_change = ca.DM(0.001)
+    u_weight_change = ca.DM(0.0001)
     R_change = u_weight_change * ca.DM.eye(n_thruster)
-    # penalized_thrusters = [4, 5, 6, 7]
-    # R_change = ca.DM.eye(n_thruster) * 0.0
-    # for i in penalized_thrusters:
-    #     R_change[i, i] = u_weight_change
 
-    Q_nu = 0.00001 * ca.DM.eye(n_dof)  # Tune as needed
-
-
+    ##########################################
+    ########### pos/att tracking  ############
+    ##########################################
     def quaternion_error(q_goal, q_current):
-            # axis-angle representation
-            # vector encodes the shortest rotation required to align q_current to q_goal
-            # not aligned with roll, pitch, and yaw
-            # axis of rotation (direction of att_error)
-            # magnitude of rotation (‖att_error‖)
-            # though the entries do not match roll, pitch, yaw, weighting the third entry does emphazize the yaw error
-            # as for small angles the axis-angle representation is equivalent to the Euler angles
-            w_g = q_goal[0]
-            x_g = q_goal[1]
-            y_g = q_goal[2]
-            z_g = q_goal[3]
-            w_c = q_current[0]
-            x_c = q_current[1]
-            y_c = q_current[2]
-            z_c = q_current[3]
-            v_g = ca.vertcat(x_g, y_g, z_g)
-            v_c = ca.vertcat(x_c, y_c, z_c)
-            goal_att_tilde = ca.vertcat(
-                ca.horzcat(0, -z_g, y_g),
-                ca.horzcat(z_g, 0, -x_g),
-                ca.horzcat(-y_g, x_g, 0)
-            )
-            att_error = ca.mtimes(w_g, v_c) - ca.mtimes(w_c, v_g) - ca.mtimes(goal_att_tilde, v_c)
-            return att_error
-
+        # axis-angle representation
+        # vector encodes the shortest rotation required to align q_current to q_goal
+        # not aligned with roll, pitch, and yaw
+        # axis of rotation (direction of att_error)
+        # magnitude of rotation (‖att_error‖)
+        # though the entries do not match roll, pitch, yaw, weighting the third entry does emphazize the yaw error
+        # as for small angles the axis-angle representation is equivalent to the Euler angles
+        w_g = q_goal[0]
+        x_g = q_goal[1]
+        y_g = q_goal[2]
+        z_g = q_goal[3]
+        w_c = q_current[0]
+        x_c = q_current[1]
+        y_c = q_current[2]
+        z_c = q_current[3]
+        v_g = ca.vertcat(x_g, y_g, z_g)
+        v_c = ca.vertcat(x_c, y_c, z_c)
+        goal_att_tilde = ca.vertcat(
+            ca.horzcat(0, -z_g, y_g),
+            ca.horzcat(z_g, 0, -x_g),
+            ca.horzcat(-y_g, x_g, 0)
+        )
+        att_error = ca.mtimes(w_g, v_c) - ca.mtimes(w_c, v_g) - ca.mtimes(goal_att_tilde, v_c)
+        return att_error
+    
     for k in range(N):
         pos_k = q[0:3, k]
         att_k = q[3:6, k]
 
-        ##########################
-        # Indem der attitude error mit quaternions berehcnte wird, habe ich instabilität etwas gelöst
-        ##########################
-
-        # Convert Euler angles to quaternion for reference and current state
-        ref_quat = euler_to_quat_casadi(reference_trajectory[3, k], reference_trajectory[4, k], reference_trajectory[5, k])
+        ref_quat  = euler_to_quat_casadi(reference_trajectory[3, k], reference_trajectory[4, k], reference_trajectory[5, k])
         curr_quat = euler_to_quat_casadi(att_k[0], att_k[1], att_k[2])
-
-        # Quaternion error (shortest arc)
         att_error = quaternion_error(ref_quat, curr_quat)
 
         pos_error = ca.DM(reference_trajectory[0:3, k]) - pos_k
-        # att_error = ca.DM(reference_trajectory[3:6, k]) - att_k # with singularities might not be correct
         
         cost += ca.mtimes([pos_error.T, Q_pos, pos_error])
         cost += ca.mtimes([att_error.T, Q_att, att_error])
-        cost += ca.mtimes([u[:, k].T, R_input, u[:, k]])
-        # cost += ca.mtimes([q[6:, k].T, Q_nu, q[6:, k]])  # Terminal cost for the twist (velocity)
 
-    # Effort smoothness / chnage of control inputs
-    delta_u = u[:, 1:] - u[:, :-1]
+    ##########################################
+    ############ control effort  #############
+    ##########################################   
+    for k in range(N):
+        cost += ca.mtimes([u[:, k].T, R_input, u[:, k]])
+
+    delta_u = u[:, 1:] - u[:, :-1] # change of control inputs (delta u) 
     for k in range(N - 1):  # not N!
         cost += ca.mtimes([delta_u[:, k].T, R_change, delta_u[:, k]])
 
-
-
-    # Terminal cost
-    # pos_error_N = ca.DM(reference_trajectory[0:3, N-1]) - q[0:3, N]
-    # att_k_N = q[3:6, N]
-    # ref_quat_N = euler_to_quat_casadi(reference_trajectory[3, N-1], reference_trajectory[4, N-1], reference_trajectory[5, N-1])
-    # curr_quat_N = euler_to_quat_casadi(att_k_N[0], att_k_N[1], att_k_N[2])
-    # att_error_N = quaternion_error(ref_quat_N, curr_quat_N)
-
-    # cost += ca.mtimes([pos_error_N.T, Q_pos, pos_error_N])
-    # cost += ca.mtimes([att_error_N.T, Q_att, att_error_N])
+    ##########################################
+    ############ slack variables #############
+    ##########################################
+    # cost += 1e4 * ca.sumsqr(epsilon_initial)
+    # cost += 1e4 * ca.sumsqr(epsilon_terminal)
+    cost += 1e2 * ca.sumsqr(u_slack)
 
     
-
-
-    # slack variable cost
-    # cost += 1e4 * ca.sumsqr(pitch_slack)
-    # # cost += 1e3 * ca.sumsqr(dynamic_slack)
-    # cost += 1e4 * ca.sumsqr(u_slack)
     
     opti.callback(lambda _: print("Current cost:", opti.debug.value(cost)))
     opti.minimize(cost)
@@ -456,7 +543,7 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
         print("u0:", opti.debug.value(u[:, 0]))
         print("Initial cost estimate:", opti.debug.value(cost))
 
-    # print("Solver stats:", opti.stats())
+    print("Solver stats:", opti.stats())
     for k in range(N):
         print(f"u[:, {k}] =", sol.value(u[:, k]))
 
@@ -519,6 +606,8 @@ def main():
     plt.tight_layout()
     plt.show()
 
+
+
     plt.figure()
     plt.plot(np.arange(cost.shape[0]) * dt, cost)
     plt.xlabel('Time [s]')
@@ -528,6 +617,35 @@ def main():
     plt.show()
 
     plot_vehicle_pos_vs_reference(reference_eta.T, real_eta)
+    plt.show()
+
+    plt.figure(figsize=(10, 8))
+    angle_labels = ['Roll (phi)', 'Pitch (theta)', 'Yaw (psi)']
+    for i in range(3):
+        plt.subplot(3, 1, i + 1)
+        plt.plot(np.arange(reference_eta.shape[1]) * dt, reference_eta[i + 3, :], label='Reference')
+        plt.plot(np.arange(real_eta.shape[0]) * dt, real_eta[:, i + 3], label='Real')
+        plt.ylabel(angle_labels[i])
+        plt.legend()
+        plt.grid(True)
+        if i == 0:
+            plt.title('Euler Angles: Reference vs Real')
+    plt.xlabel('Time [s]')
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(10, 8))
+    vel_labels = ['u (surge)', 'v (sway)', 'w (heave)', 'p (roll rate)', 'q (pitch rate)', 'r (yaw rate)']
+    for i in range(6):
+        plt.subplot(6, 1, i + 1)
+        plt.plot(np.arange(real_nu.shape[0]) * dt, real_nu[:, i])
+        plt.ylabel(vel_labels[i])
+        if i == 0:
+            plt.title('Linear and Angular Velocities over Time')
+        if i == 5:
+            plt.xlabel('Time [s]')
+        plt.grid(True)
+    plt.tight_layout()
     plt.show()
 
     plt.figure()
