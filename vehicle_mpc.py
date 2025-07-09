@@ -286,62 +286,27 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
     # Integrator selection dictionary
     integrator_dict = {
         0: 'explicit_euler',
-        1: 'rk4_coupled_coordinates', # improves slightly over explicit euler, but sloooooow
+        1: 'rk4_coupled_coordinates',
         2: 'rk4_decoupled_coordinates',
-        3: 'CasADi_integrator' # Lösung ergibt überhaupt keinen Sinn
+        3: 'CasADi_integrator'
     }
     integrator = integrator_dict.get(3)  # Change the key to select the integrator
-    ####################################################################################
-    ####################################################################################
-    ################################### Optimizer ######################################
-    ####################################################################################
-    ####################################################################################
 
-    ##########################################
-    ################ solver ##################
-    ##########################################
     opti = ca.Opti()
-    # opts = {'ipopt.print_level': 0, 'print_time': 0}
     opts = {'ipopt.print_level': 5, 'print_time': 1, 'ipopt.tol': 1e-4}
-    # opts = {"ipopt.print_level": 5,
-    #     "print_time": True,
-    #     "ipopt.sb": "yes",
-    #     "ipopt.tol": 1e-6}
-    # opts = {}
     opti.solver('ipopt', opts)
 
-    ##########################################
-    ########### state variables ##############
-    ##########################################
     q = opti.variable(2 * n_dof, N + 1)  # vehicle pose (with euler angles) eta and twist nu
     u = opti.variable(n_thruster, N)  # thruster PWM commands (normalized [-1, 1])
-
-    ##########################################
-    ########### slack variables ##############
-    ##########################################
-    # slack variables to soften the constraints
-    # solver can violate the constraint slightly, but it will be penalized heavily in the cost
-    # epsilon_terminal = opti.variable(n_dof)
-    # epsilon_initial = opti.variable(2 * n_dof)
 
     u_slack = opti.variable()
     opti.subject_to(u_slack >= 0)
 
-    # pitch_slack = opti.variable()
-    # opti.subject_to(pitch_slack >= 0)
-    # dynamic_slack = opti.variable(n_dof)
-    # opti.subject_to(dynamic_slack >= 0)
-    
-    ##########################################
-    ############ initial guess ###############
-    ##########################################
     q_init = np.tile(np.concatenate([np.array(eta0).flatten(), np.array(nu0).flatten()]), (N + 1, 1)).T
     opti.set_initial(q, q_init)
     opti.set_initial(u, u0)
 
-    ##########################################
-    ##### function for CasADi integrator #####
-    ##########################################
+    # --- CasADi integrator definition ---
     x_int = ca.MX.sym('x_int', 2 * n_dof)  # eta (6) + nu (6)
     u_int = ca.MX.sym('u_int', n_thruster)
 
@@ -355,43 +320,20 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
     xdot = ca.vertcat(eta_dot, nu_dot)
     ode = {'x': x_int, 'p': u_int, 'ode': xdot}
 
-    integrator = ca.integrator('integrator', 'cvodes', ode, {'tf': dt})
+    # The integrator must be created OUTSIDE the loop, but called INSIDE the loop!
+    casadi_integrator = ca.integrator('integrator', 'cvodes', ode, {'tf': dt})
 
-    ####################################################################################
-    ####################################################################################
-    ################################## Constraints #####################################
-    ####################################################################################
-    ####################################################################################
     for k in range(N):
-        ##########################################
-        ######## control input constraint ########
-        ##########################################
         for thruster in range(n_thruster):
-            # opti.subject_to(u[thruster, k] <= 1.0)
-            # opti.subject_to(u[thruster, k] >= -1.0)
             opti.subject_to(u[thruster, k] <= 1.0 + u_slack)
             opti.subject_to(u[thruster, k] >= -1.0 - u_slack)
 
-        ##########################################
-        ############ state constraint ############
-        ##########################################
-        # opti.subject_to(q[3, k] >= -np.pi * 3 / 4)  # phi should be in [-pi/2, pi/2] (roll)
-        # opti.subject_to(q[3, k] <= np.pi * 3 / 4)
-        # opti.subject_to(q[4, k] >= -np.pi * 85 /180 - pitch_slack)  # theta (pitch) should be in [-85°, 85°] to avoid gimbal lock (for zyx Euler config) at +-90°, 
-        # opti.subject_to(q[4, k] <= np.pi * 85 / 180 + pitch_slack)  # thus singularities in J, when 1/cos(theta) would blow up
-
-        ##########################################
-        ############ system equations ############
-        ##########################################
         if integrator == 'explicit_euler':
-            # dynamics
             tau = symbolic_bluerov.L * ca.DM(V_bat) * symbolic_bluerov.mixer @ u[:, k]
             nu_dot = symbolic_bluerov.M_inv @ (tau - symbolic_bluerov.C(q[6:, k]) @ q[6:, k] - symbolic_bluerov.D(q[6:, k]) @ q[6:, k] - symbolic_bluerov.g(q[0:6, k]))
             opti.subject_to(q[6:, k+1] == q[6:, k] + dt * nu_dot)
-            # kinematics
-            opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * symbolic_bluerov.J(q[:, k]) @ q[6:, k])
+            opti.subject_to(q[0:6, k+1] == q[0:6, k] + dt * symbolic_bluerov.J(q[0:6, k]) @ q[6:, k])
         elif integrator == 'rk4_coupled_coordinates':
-            # combined kinematics and dynamics in one funtion f: x_dot = (eta_dot, nu_dot) = (kinematics, dynamics) = f(eta, nu, u) = f(x, u)
             def f(x, u):
                 eta = x[0:6]
                 nu = x[6:12]
@@ -408,7 +350,6 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
             x_next = x_k + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
             opti.subject_to(q[:, k+1] == x_next)
         elif integrator == 'rk4_decoupled_coordinates':
-            # dynamics
             def f(nu, eta):
                 tau = symbolic_bluerov.L * V_bat * (symbolic_bluerov.mixer @ u[:, k])
                 return symbolic_bluerov.M_inv @ (tau - symbolic_bluerov.C(nu) @ nu - symbolic_bluerov.D(nu) @ nu - symbolic_bluerov.g(eta))
@@ -418,68 +359,36 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
             k2 = f(nu_k + 0.5 * dt * k1, eta_k)
             k3 = f(nu_k + 0.5 * dt * k2, eta_k)
             k4 = f(nu_k + dt * k3, eta_k)
-
             nu_next = nu_k + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
             opti.subject_to(q[6:, k+1] == nu_next)
-            # kinematics
-            def f(eta):
-                return bluerov.J(eta) @ nu_k
-            k1 = f(eta_k)
-            k2 = f(eta_k + 0.5 * dt * k1)
-            k3 = f(eta_k + 0.5 * dt * k2)
-            k4 = f(eta_k + dt * k3)
-
+            def f_eta(eta):
+                return symbolic_bluerov.J(eta) @ nu_k
+            k1 = f_eta(eta_k)
+            k2 = f_eta(eta_k + 0.5 * dt * k1)
+            k3 = f_eta(eta_k + 0.5 * dt * k2)
+            k4 = f_eta(eta_k + dt * k3)
             eta_next = eta_k + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
             opti.subject_to(q[0:6, k+1] == eta_next)
         elif integrator == 'CasADi_integrator':
+            # Correct usage: call the integrator function with x0 and p
             xk = q[:, k]
-            x_next = integrator(x0=xk, p=u[:, k])['xf']
+            uk = u[:, k]
+            x_next = casadi_integrator(x0=xk, p=uk)['xf']
             opti.subject_to(q[:, k+1] == x_next)
 
-    ##########################################
-    ########## initial constraint ############
-    ##########################################
-    opti.subject_to(q[:, 0] == ca.vertcat(eta0, nu0))  # epsilon_initial ,   initial state (pose and twist)
+    opti.subject_to(q[:, 0] == ca.vertcat(eta0, nu0))
 
-    ##########################################
-    ########## terminal constraint ###########
-    ##########################################
-    # opti.subject_to(q[0:6, N] == ca.DM(reference_trajectory[:, N-1]) + epsilon_terminal)
-
-    ####################################################################################
-    ####################################################################################
-    ################################# Cost function ####################################
-    ####################################################################################
-    ####################################################################################
     cost = 0
-
-    ##########################################
-    ################ weights #################
-    ##########################################
-    # attitude error weighting
     q_weight_att = 5.0
-    Q_att = q_weight_att * ca.diag(ca.DM([1.0, 1.0, 2.0])) # penelize yaw more than roll and pitch
-    # position error weighting
+    Q_att = q_weight_att * ca.diag(ca.DM([1.0, 1.0, 2.0]))
     q_weight_pos = 5.0
     Q_pos = q_weight_pos * ca.diag(ca.DM([1.0, 1.0, 1.0]))
-    # control input weighting  
     u_weight = ca.DM(0.0001)
     R_input = u_weight * ca.DM.eye(n_thruster)
-    # control input change weighting  
     u_weight_change = ca.DM(0.0001)
     R_change = u_weight_change * ca.DM.eye(n_thruster)
 
-    ##########################################
-    ########### pos/att tracking  ############
-    ##########################################
     def quaternion_error(q_goal, q_current):
-        # axis-angle representation
-        # vector encodes the shortest rotation required to align q_current to q_goal
-        # not aligned with roll, pitch, and yaw
-        # axis of rotation (direction of att_error)
-        # magnitude of rotation (‖att_error‖)
-        # though the entries do not match roll, pitch, yaw, weighting the third entry does emphazize the yaw error
-        # as for small angles the axis-angle representation is equivalent to the Euler angles
         w_g = q_goal[0]
         x_g = q_goal[1]
         y_g = q_goal[2]
@@ -497,39 +406,26 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
         )
         att_error = ca.mtimes(w_g, v_c) - ca.mtimes(w_c, v_g) - ca.mtimes(goal_att_tilde, v_c)
         return att_error
-    
+
     for k in range(N):
         pos_k = q[0:3, k]
         att_k = q[3:6, k]
-
         ref_quat  = euler_to_quat_casadi(reference_trajectory[3, k], reference_trajectory[4, k], reference_trajectory[5, k])
         curr_quat = euler_to_quat_casadi(att_k[0], att_k[1], att_k[2])
         att_error = quaternion_error(ref_quat, curr_quat)
-
         pos_error = ca.DM(reference_trajectory[0:3, k]) - pos_k
-        
         cost += ca.mtimes([pos_error.T, Q_pos, pos_error])
         cost += ca.mtimes([att_error.T, Q_att, att_error])
 
-    ##########################################
-    ############ control effort  #############
-    ##########################################   
     for k in range(N):
         cost += ca.mtimes([u[:, k].T, R_input, u[:, k]])
 
-    delta_u = u[:, 1:] - u[:, :-1] # change of control inputs (delta u) 
-    for k in range(N - 1):  # not N!
+    delta_u = u[:, 1:] - u[:, :-1]
+    for k in range(N - 1):
         cost += ca.mtimes([delta_u[:, k].T, R_change, delta_u[:, k]])
 
-    ##########################################
-    ############ slack variables #############
-    ##########################################
-    # cost += 1e4 * ca.sumsqr(epsilon_initial)
-    # cost += 1e4 * ca.sumsqr(epsilon_terminal)
     cost += 1e2 * ca.sumsqr(u_slack)
 
-    
-    
     opti.callback(lambda _: print("Current cost:", opti.debug.value(cost)))
     opti.minimize(cost)
 
@@ -538,7 +434,6 @@ def solve_cftoc_pwm(N, n_dof, symbolic_bluerov, nu0, eta0, reference_trajectory,
         print("Value of pos_error:", opti.debug.value(pos_error))
     except RuntimeError:
         print("Infeasible. Checking debug values...")
-        
         print("q0:", opti.debug.value(q[:, 0]))
         print("u0:", opti.debug.value(u[:, 0]))
         print("Initial cost estimate:", opti.debug.value(cost))
