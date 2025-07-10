@@ -22,28 +22,67 @@ class BlueROVDynamics:
 
         self.M = self.compute_mass_matrix()
 
-        # Thruster geometry parameters (from YAML)
-        alpha_f = 0.733   # 42 / 180 * pi
-        alpha_r = 0.8378  # 48 / 180 * pi
-        l_hf = 0.163
-        l_hr = 0.177
-        l_vx = 0.12
-        l_vy = 0.218
+        # # Thruster geometry parameters (from YAML)
+        # alpha_f = 0.733   # 42 / 180 * pi
+        # alpha_r = 0.8378  # 48 / 180 * pi
+        # l_hf = 0.163
+        # l_hr = 0.177
+        # l_vx = 0.12
+        # l_vy = 0.218
 
-        calpha_f = np.cos(alpha_f)
-        salpha_f = np.sin(alpha_f)
-        calpha_r = np.cos(alpha_r)
-        salpha_r = np.sin(alpha_r)
+        # calpha_f = np.cos(alpha_f)
+        # salpha_f = np.sin(alpha_f)
+        # calpha_r = np.cos(alpha_r)
+        # salpha_r = np.sin(alpha_r)
 
-        # Mixer matrix for thrusters (purely geometrical, for tau = [forces, moments])
-        self.mixer = np.array([
-            [calpha_f, calpha_f  , calpha_r  , calpha_r , 0     , 0     , 0     , 0   ],
-            [salpha_f, -salpha_f , -salpha_r , salpha_r , 0     , 0     , 0     , 0   ],
-            [0       , 0         , 0         , 0        , 1     , -1    , -1    , 1   ],
-            [0       , 0         , 0         , 0        , -l_vy , -l_vy , l_vy  , l_vy],
-            [0       , 0         , 0         , 0        , -l_vx , l_vx  , -l_vx , l_vx],
-            [l_hf    , -l_hf     , l_hr      , -l_hr    , 0     , 0     , 0     , 0   ]
-        ])
+        # # Mixer matrix for thrusters (purely geometrical, for tau = [forces, moments])
+        # self.mixer = np.array([
+        #     [calpha_f, calpha_f  , calpha_r  , calpha_r , 0     , 0     , 0     , 0   ],
+        #     [salpha_f, -salpha_f , -salpha_r , salpha_r , 0     , 0     , 0     , 0   ],
+        #     [0       , 0         , 0         , 0        , 1     , -1    , -1    , 1   ],
+        #     [0       , 0         , 0         , 0        , -l_vy , -l_vy , l_vy  , l_vy],
+        #     [0       , 0         , 0         , 0        , -l_vx , l_vx  , -l_vx , l_vx],
+        #     [l_hf    , -l_hf     , l_hr      , -l_hr    , 0     , 0     , 0     , 0   ]
+        # ])
+
+
+        # Thruster geometry parameters (from Wu 2018)
+        alpha_f = np.pi / 4
+        alpha_r = np.pi / 4
+        # unit direction of thrust
+        n1 = np.array([np.cos(alpha_f), np.sin(alpha_f), 0])
+        n2 = np.array([np.cos(alpha_f), -np.sin(alpha_f), 0])
+        n3 = np.array([np.cos(alpha_r), -np.sin(alpha_r), 0])
+        n4 = np.array([np.cos(alpha_r), np.sin(alpha_r), 0])
+        n5 = np.array([0, 0, 1])
+        n6 = np.array([0, 0, -1])
+        n7 = np.array([0, 0, -1])
+        n8 = np.array([0, 0, 1])
+        # thruster lever arms (from Wu 2018)
+        l_xt = 0.156
+        l_yt = 0.111
+        l_zt = 0.0
+        l_xb = 0.12
+        l_yb = 0.218
+        l_zb = 0.085
+        l1 = np.array([l_xt, -l_yt, l_zt])
+        l2 = np.array([l_xt, l_yt, l_zt])
+        l3 = np.array([-l_xt, -l_yt, l_zt])
+        l4 = np.array([-l_xt, l_yt, l_zt])
+        l5 = np.array([l_xb, -l_yb, -l_zb])
+        l6 = np.array([l_xb, l_yb, -l_zb])
+        l7 = np.array([-l_xb, -l_yb, -l_zb])
+        l8 = np.array([-l_xb, l_yb, -l_zb])
+
+        # Compute mixer matrix using numpy cross product for thrust directions and lever arms
+        n_list = [n1, n2, n3, n4, n5, n6, n7, n8]
+        l_list = [l1, l2, l3, l4, l5, l6, l7, l8]
+        n_arr = np.stack(n_list, axis=1)  # shape (3, 8)
+        l_arr = np.stack(l_list, axis=1)  # shape (3, 8)
+        cross_arr = np.cross(l_arr.T, n_arr.T).T  # shape (3, 8)
+        self.mixer = np.vstack([n_arr, cross_arr])  # shape (6, 8)
+        self.mixer = np.where(np.abs(self.mixer) < 1e-6, 0.0, self.mixer)  # enforce exact zeros
+
         self.mixer_inv = np.linalg.pinv(self.mixer)
 
         self.L = 2.5166 # scaling factor for PWM to thrust conversion
@@ -324,7 +363,7 @@ def generate_circle_trajectory_time(
     """
     num_steps_per_circle = int(np.round(T / dt))
     t = np.tile(np.linspace(0, T, num_steps_per_circle, endpoint=False), n)
-    theta = - 2 * np.pi * (t / T)
+    theta = 2 * np.pi * (t / T)
     x = center[0] + radius * np.cos(theta)
     y = center[1] + radius * np.sin(theta)
     z = np.full_like(x, center[2])
@@ -341,7 +380,7 @@ def generate_sine_on_circle_trajectory_time(
     center=np.array([0.0, 0.0, -1.0]),
     dt=0.01,
     T=10.0,
-    sine_amplitude=0.5,
+    sine_amplitude=0.2,
     sine_phase=0.0,
     n=3
 ):
@@ -443,7 +482,79 @@ def generate_linear_trajectory(start, end, T, dt):
 
     return traj
 
+
+def generate_slow_sine_curve_trajectory(start, end, T, dt, amplitude=0.2, wavelength=5.0, vertical_amplitude=0.2):
+    """
+    Generates a slow, smooth 3D sine-curve trajectory from start to end.
+    The path oscillates laterally and vertically as it moves from start to end.
+
+    Args:
+        start: np.array, shape (3,), start position [x, y, z]
+        end: np.array, shape (3,), end position [x, y, z]
+        T: float, total time to traverse (seconds)
+        dt: float, time step (seconds)
+        amplitude: float, amplitude of lateral sine oscillation (meters)
+        wavelength: float, wavelength of the sine curve (meters)
+        vertical_amplitude: float, amplitude of vertical sine oscillation (meters)
+
+    Returns:
+        traj: np.array, shape (num_steps, 6), each row is [x, y, z, phi, theta, psi]
+    """
+    num_steps = int(np.round(T / dt)) + 1
+    positions = np.linspace(start, end, num_steps)
+    direction = end - start
+    direction_norm = np.linalg.norm(direction)
+    if direction_norm < 1e-8:
+        # No movement, keep orientation zero
+        phi = theta = psi = 0.0
+        traj = np.hstack([positions, np.zeros((num_steps, 3))])
+        return traj
+
+    # Unit vector along the path
+    dir_unit = direction / direction_norm
+
+    # Find a vector perpendicular to dir_unit for lateral oscillation
+    # Use z-axis unless path is vertical, then use x-axis
+    if np.allclose(np.abs(dir_unit), [0, 0, 1]):
+        perp = np.array([1, 0, 0])
+    else:
+        perp = np.cross(dir_unit, [0, 0, 1])
+        perp /= np.linalg.norm(perp)
+
+    # For vertical oscillation, use a vector perpendicular to both dir_unit and perp
+    perp_vert = np.cross(dir_unit, perp)
+    perp_vert /= np.linalg.norm(perp_vert)
+
+    # Parameter along the path
+    s = np.linspace(0, direction_norm, num_steps)
+    # Lateral sine oscillation
+    lateral_offset = amplitude * np.sin(2 * np.pi * s / wavelength)
+    # Vertical sine oscillation (phase shifted for variety)
+    vertical_offset = vertical_amplitude * np.sin(2 * np.pi * s / (wavelength * 1.5) + np.pi / 3)
+
+    # Build full 3D positions
+    pos = positions + np.outer(lateral_offset, perp) + np.outer(vertical_offset, perp_vert)
+
+    # Compute tangent vectors for orientation
+    pos_diff = np.gradient(pos, axis=0)
+    tangent = pos_diff / np.linalg.norm(pos_diff, axis=1, keepdims=True)
+
+    # Heading (psi): angle in XY plane
+    psi = np.arctan2(tangent[:, 1], tangent[:, 0])
+    # Pitch (theta): angle up/down from horizontal
+    theta = np.arcsin(tangent[:, 2])
+    # Roll (phi): always zero
+    phi = np.zeros(num_steps)
+
+    traj = np.hstack([pos, phi[:, None], theta[:, None], psi[:, None]])
+    return traj
+
 def main():
+    # Create a BlueROVDynamics object and print the mixer matrix
+    bluerov_params = load_model_params('model_params.yaml')
+    dynamics = BlueROVDynamics(bluerov_params)
+    print("Mixer matrix:\n", dynamics.mixer)
+    return
     bluerov_params = load_model_params('model_params.yaml')
     dynamics = BlueROVDynamics(bluerov_params)
 
@@ -512,6 +623,9 @@ def main():
     # minimize pwm sign wechsel, also damit thrust direction changes -> dort vielleicht irgendwie die deadzone einbauen / modellieren / asl constraint setzen?
 
     # for MPC and later, denormalize PWM signals to [1100, 1900] μs
+
+
+    
 
     
 

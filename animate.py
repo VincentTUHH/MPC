@@ -175,3 +175,78 @@ def plot_vehicle_pos_vs_reference(ref_positions, real_positions):
         axs[i].grid(True)
     axs[2].set_xlabel('Timestep')
     plt.tight_layout()
+
+
+def plot_delta_u(u_optimal, dt):
+    import matplotlib.pyplot as plt
+    delta_u = np.diff(u_optimal, axis=1)
+    plt.figure()
+    for i in range(delta_u.shape[0]):
+        plt.subplot(delta_u.shape[0], 1, i + 1)
+        plt.plot(np.arange(delta_u.shape[1]) * dt, delta_u[i, :])
+        plt.ylabel(f'Δu[{i}]')
+        if i == 0:
+            plt.title('Change of Control Inputs (delta u) over Time')
+        if i == delta_u.shape[0] - 1:
+            plt.xlabel('Time [s]')
+        plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+def plot_mpc_cost(cost, dt):
+    import matplotlib.pyplot as plt
+    plt.figure()
+    plt.plot(np.arange(cost.shape[0]) * dt, cost)
+    plt.xlabel('Time [s]')
+    plt.ylabel('MPC Cost')
+    plt.title('MPC Cost over Time')
+    plt.grid(True)
+    plt.show()
+
+def plot_euler_angles_vs_reference(reference_eta, real_eta, dt):
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(10, 8))
+    angle_labels = ['Roll (phi)', 'Pitch (theta)', 'Yaw (psi)']
+    for i in range(3):
+        plt.subplot(3, 1, i + 1)
+        plt.plot(np.arange(reference_eta.shape[1]) * dt, reference_eta[i + 3, :], label='Reference')
+        plt.plot(np.arange(real_eta.shape[0]) * dt, real_eta[:, i + 3], label='Real')
+        plt.ylabel(angle_labels[i])
+        plt.legend()
+        plt.grid(True)
+        if i == 0:
+            plt.title('Euler Angles: Reference vs Real')
+    plt.xlabel('Time [s]')
+    plt.tight_layout()
+    plt.show()
+
+def plot_velocities(real_nu, dt):
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(10, 8))
+    vel_labels = ['u (surge)', 'v (sway)', 'w (heave)', 'p (roll rate)', 'q (pitch rate)', 'r (yaw rate)']
+    for i in range(6):
+        plt.subplot(6, 1, i + 1)
+        plt.plot(np.arange(real_nu.shape[0]) * dt, real_nu[:, i])
+        plt.ylabel(vel_labels[i])
+        if i == 0:
+            plt.title('Linear and Angular Velocities over Time')
+        if i == 5:
+            plt.xlabel('Time [s]')
+        plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+def plot_control_inputs(u_optimal, dt):
+    import matplotlib.pyplot as plt
+    plt.figure()
+    for i in range(u_optimal.shape[0]):
+        plt.subplot(u_optimal.shape[0], 1, i + 1)
+        plt.plot(np.arange(u_optimal.shape[1]) * dt, u_optimal[i, :])
+        plt.ylabel(f'u[{i}]')
+        if i == 0:
+            plt.title('Control Inputs (u) over Time')
+        if i == u_optimal.shape[0] - 1:
+            plt.xlabel('Time [s]')
+        plt.grid(True)
+    plt.tight_layout()
+    plt.show()
