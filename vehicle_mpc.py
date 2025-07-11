@@ -1,7 +1,7 @@
 import casadi as ca
 import numpy as np
 import bluerov
-from animate import animate_bluerov, plot_vehicle_pos_vs_reference, plot_delta_u, plot_mpc_cost, plot_euler_angles_vs_reference, plot_velocities, plot_control_inputs
+from animate import animate_bluerov, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
 import time
 import matplotlib.pyplot as plt
 
@@ -237,7 +237,7 @@ def skew_symmetric_symbolic(v):
 
 # --- Main MPC Function ---
 
-def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, dt, N, integrator, use_pwm=False, use_quaternion=False, V_bat=16.0):
+def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, dt, N, integrator, opts, use_pwm=False, use_quaternion=False, V_bat=16.0):
     M = int(T_trajectory / dt)
     n_dof = 6
     n_thruster = 8
@@ -260,12 +260,17 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
     else:
         state_dim = n_dof + 6
 
+    q_predict = np.zeros((state_dim, N+1, M))
+
     q_real = np.zeros((2 * n_dof, M + 1))
     q_real[:n_dof, 0] = reference_trajectory[:, 0]
     if reference_trajectory.shape[1] >= 3: # moving average for velocity
         q_real[n_dof:, 0] = (reference_trajectory[:, 2] - reference_trajectory[:, 0]) / (2 * dt)
     else:
         q_real[n_dof:, 0] = (reference_trajectory[:, 1] - reference_trajectory[:, 0]) / dt
+
+    # dual variables for warm start
+    prev_g = None
 
     # Convert reference trajectory to quaternion if needed
     if use_quaternion:
@@ -279,12 +284,15 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
     u_optimal = np.zeros((n_thruster if use_pwm else n_dof, M))
     cost = np.zeros(M)
 
+    jacobian_array = np.zeros(M)
+
     # Initial guess for control
     u0 = np.full((u_optimal.shape[0], N), 0.2)
 
     start_time = time.time()
 
     for step in range(M):
+        print(f"Step {step + 1} / {M}")
         # Reference for horizon
         ref_traj_horizon = reference_trajectory[:, step:step + N]
         if ref_traj_horizon.shape[1] < N:
@@ -304,16 +312,37 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
             eta = q_real[:n_dof, step]
             q0 = np.concatenate([nu, eta])
 
+        # Prepare initial guess for q using previous prediction
+        if step == 0:
+            # First step: use q0 for all horizon steps
+            q_init = np.tile(q0.reshape(-1, 1), (1, N + 1))
+        else:
+            # Use previous prediction, shifted by one, and append last predicted state
+            prev_q_pred = q_predict[:, :, step - 1]
+            q_init = np.hstack([prev_q_pred[:, 1:], prev_q_pred[:, -1:]])
+            # Replace first column with actual state q0
+            q_init[:, 0] = q0
+
         # Solve optimal control problem
-        q_opt, u_optimal_horizon, Jopt = solve_cftoc(
-            N, n_dof, symbolic_bluerov, q0, ref_traj_horizon, dt,
+        if step == 0:
+            # First step: no warm start
+            q_opt, u_optimal_horizon, Jopt, prev_g = solve_cftoc(
+            N, n_dof, symbolic_bluerov, q_init, ref_traj_horizon, dt,
             u0, n_thruster, V_bat, use_pwm, use_quaternion, 
-            integrator
-        )
+            integrator, opts, prev_g
+            )
+        else:
+            # Warm start using previous solver
+            q_opt, u_optimal_horizon, Jopt, prev_g = solve_cftoc(
+            N, n_dof, symbolic_bluerov, q_init, ref_traj_horizon, dt,
+            u0, n_thruster, V_bat, use_pwm, use_quaternion, 
+            integrator, opts, prev_g
+            )
 
         u_optimal[:, step] = u_optimal_horizon[:, 0]
         u0 = np.hstack([u_optimal_horizon[:, 1:], u_optimal_horizon[:, -1][:, np.newaxis]])
         cost[step] = Jopt
+        q_predict[:, :, step] = q_opt
 
         # Simulate real system (always in Euler)
         if use_pwm:
@@ -326,9 +355,13 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
             q_real[n_dof:, step + 1], q_real[:n_dof, step + 1], _ = bluerov.forward_dynamics(
                 real_bluerov, tau=u_optimal[:, step], nu=q_real[n_dof:, step], eta=q_real[:n_dof, step], dt=dt
             )
+
+        jacobian = bluerov.rigid_body_jacobian_euler(q_real[0:6, step+1])
+        jacobian_array[step] = np.linalg.cond(jacobian)
         
     end_time = time.time()
     print(f"MPC computation time: {end_time - start_time:.2f} seconds")
+    plot_jacobian_condition_number(jacobian_array, dt)
 
     return q_real, cost, u_optimal
 
@@ -440,24 +473,31 @@ def quaternion_error(q_goal, q_current):
         att_error = ca.mtimes(w_g, v_c) - ca.mtimes(w_c, v_g) - ca.mtimes(goal_att_tilde, v_c)
         return att_error
 
-def solve_cftoc(N, n_dof, symbolic_bluerov, q0, reference_trajectory, dt, u0, n_thruster, V_bat, use_pwm, use_quaternion, integrator):
+def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0, n_thruster, V_bat, use_pwm, use_quaternion, integrator, opts, prev_g):
     # TODO: ich berechne mir ja auch ein q_predict, übernehme das in die nächste Optimierung und setze es als Startwert für q, also nicht
     # immer q0 asl STratwert für alles nehmen. Wobei q_predict der erste Wert durch q0 ersetzt werden sollte, also dem echten state
     # oder ist es vielleicht besser q0 weiterhin als erstes aber die restlichen elemente von reference trajectory zu nehmen? wobei dort kein twist dabei ist...
     
     
     opti = ca.Opti()
+    if opts is None:
+        raise ValueError("Solver options 'opts' must be provided.")
+    opti.solver('ipopt', opts)
     state_dim = n_dof + (7 if use_quaternion else 6)
     q = opti.variable(state_dim, N + 1)
     u = opti.variable(n_thruster if use_pwm else n_dof, N)
     slack = opti.variable(u.shape[0])
-    opti.set_initial(q, ca.repmat(ca.DM(q0), 1, N + 1))
-    opti.set_initial(u, u0)
-    opti.set_initial(slack, 0.0)
 
     # Initial state constraint
-    opti.subject_to(q[:, 0] == ca.DM(q0))
+    opti.subject_to(q[:, 0] == ca.DM(q_init[:, 0]))
     opti.subject_to(slack >= 0)
+
+    # Warm start: if previous solver/solution is available, use its values except for q (always use q_init)
+    
+    opti.set_initial(u, u0)
+    opti.set_initial(slack, 0.0)
+    # Always use q_init for q
+    opti.set_initial(q, q_init)
 
     # Dynamics and constraints
     for k in range(N):
@@ -498,7 +538,8 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q0, reference_trajectory, dt, u0, n_
             att_error = quaternion_error(reference_trajectory[3:, k], q[n_dof+3:, k])
         else:
             ref_quat = euler_to_quat_casadi(*reference_trajectory[3:, k])
-            curr_quat = euler_to_quat_casadi(*q[n_dof+3:, k])
+            roll, pitch, yaw = ca.vertsplit(q[n_dof+3:, k])
+            curr_quat = euler_to_quat_casadi(roll, pitch, yaw)
             att_error = quaternion_error(ref_quat, curr_quat)
         cost += ca.dot(att_error, Q_att @ att_error)
 
@@ -506,18 +547,26 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q0, reference_trajectory, dt, u0, n_
         cost += ca.dot(u[:, k], R_input @ u[:, k])
 
         # Control smoothness (delta u)
-        if k > 0:
-            delta_u = u[:, k] - u[:, k-1]
-            cost += ca.dot(delta_u, R_delta_u @ delta_u)
+        # if k > 0:
+        #     delta_u = u[:, k] - u[:, k-1]
+        #     cost += ca.dot(delta_u, R_delta_u @ delta_u)
 
         # Add high penalty for slack in cost
-        cost += 1e4 * ca.sumsqr(slack)
+        cost += 1e2 * ca.sumsqr(slack)
 
+    opti.callback(lambda _: print("Current cost:", opti.debug.value(cost)))
     opti.minimize(cost)
+
+    # Warm start dual variables if available
+    if prev_g is not None:
+        try:
+            opti.set_initial(opti.lam_g, prev_g)
+        except Exception as e:
+            print("Warning: Could not set dual variables for warm start:", e)
 
     try:
         sol = opti.solve()
-        return sol.value(q), sol.value(u), sol.value(cost)
+        return sol.value(q), sol.value(u), sol.value(cost), sol.value(opti.lam_g)
     except RuntimeError:
         print("Infeasible. Debug info:")
         print("q0:", opti.debug.value(q[:, 0]))
@@ -537,7 +586,7 @@ def main():
     n = 1
     N = 20  # MPC horizon
 
-    use_quaternion = False  # Switch between Euler and quaternion model for MPC
+    use_quaternion = True  # Switch between Euler and quaternion model for MPC
     use_pwm = True         # Switch between tau and PWM control
     integrator_dict = {
         0: 'explicit_euler',
@@ -548,26 +597,39 @@ def main():
     }
     integrator = integrator_dict.get(0)
 
+    opts = {'ipopt.print_level': 0, 'print_time': 0}
+
 
     # trajectory / real_traj states are always in euler angles
     # [eta, nu] where
     # eta = [x, y, z, phi, theta, psi] (pose in Euler angles)
     # nu = [u, v, w, p, q, r] (linear and angular velocities)
-    reference_eta = bluerov.generate_circle_trajectory_time(T=T, dt=dt, n=n).T
+    # reference_eta = bluerov.generate_circle_trajectory_time(T=T, dt=dt, n=n).T
+
+    start = np.array([0.0, 0.0, -1.0])  # [x, y, z, roll, pitch, yaw]
+    # end = np.array([-4.24, 4.24, -1.0]) # 5/4 pi
+    # end = np.array([-4.24, -4.24, -1.0]) # -5/4 pi
+    # end = np.array([4, 5, -1.0])
+    # end = np.array([-6, 0, -1.0]) # +-pi
+    end = np.array([4, 5, -1.0])
+    reference_eta = bluerov.generate_linear_trajectory(start, end, T, dt).T
+
 
     real_traj, cost, u_optimal = run_mpc(
-        bluerov_symbolic, bluerov_dynamics, reference_eta, T*n, dt, N, integrator,
+        bluerov_symbolic, bluerov_dynamics, reference_eta, T*n, dt, N, 
+        integrator, opts,
         use_pwm=use_pwm, use_quaternion=use_quaternion, V_bat=16.0
     )
 
     real_eta = real_traj[:6, :-1].T
     real_nu = real_traj[6:, :-1].T
+    reference_eta = reference_eta.T
 
     # Call plotting functions
     plot_delta_u(u_optimal, dt)
     plot_mpc_cost(cost, dt)
-    plot_vehicle_pos_vs_reference(reference_eta, real_eta)
-    plot_euler_angles_vs_reference(reference_eta, real_eta, dt)
+    plot_vehicle_pos_vs_reference_time(reference_eta, real_eta, dt)
+    plot_vehicle_euler_angles_vs_reference_time(reference_eta, real_eta, dt)
     plot_velocities(real_nu, dt)
     plot_control_inputs(u_optimal, dt)
     animate_bluerov(real_eta, dt=dt)

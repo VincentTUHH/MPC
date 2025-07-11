@@ -176,9 +176,32 @@ def plot_vehicle_pos_vs_reference(ref_positions, real_positions):
     axs[2].set_xlabel('Timestep')
     plt.tight_layout()
 
+def plot_vehicle_pos_vs_reference_time(ref_positions, real_positions, dt):
+    # Plot real and reference positions x, y, z over time in separate subplots
+    
+    n = real_positions.shape[0]
+    time = np.arange(n) * dt
+    
+    fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    axs[0].plot(time, real_positions[:n, 0], label='x (real)')
+    axs[0].plot(time, ref_positions[:n, 0], '--', label='x (ref)')
+    axs[0].set_ylabel('x [m]')
+    axs[0].legend()
+    axs[1].plot(time, real_positions[:n, 1], label='y (real)')
+    axs[1].plot(time, ref_positions[:n, 1], '--', label='y (ref)')
+    axs[1].set_ylabel('y [m]')
+    axs[1].legend()
+    axs[2].plot(time, real_positions[:n, 2], label='z (real)')
+    axs[2].plot(time, ref_positions[:n, 2], '--', label='z (ref)')
+    axs[2].set_ylabel('z [m]')
+    axs[2].set_xlabel('Time [s]')
+    axs[2].legend()
+    fig.suptitle('Real vs Reference Vehicle Positions Over Time')
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+
 
 def plot_delta_u(u_optimal, dt):
-    import matplotlib.pyplot as plt
     delta_u = np.diff(u_optimal, axis=1)
     plt.figure()
     for i in range(delta_u.shape[0]):
@@ -194,7 +217,6 @@ def plot_delta_u(u_optimal, dt):
     plt.show()
 
 def plot_mpc_cost(cost, dt):
-    import matplotlib.pyplot as plt
     plt.figure()
     plt.plot(np.arange(cost.shape[0]) * dt, cost)
     plt.xlabel('Time [s]')
@@ -203,25 +225,30 @@ def plot_mpc_cost(cost, dt):
     plt.grid(True)
     plt.show()
 
-def plot_euler_angles_vs_reference(reference_eta, real_eta, dt):
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(10, 8))
-    angle_labels = ['Roll (phi)', 'Pitch (theta)', 'Yaw (psi)']
-    for i in range(3):
-        plt.subplot(3, 1, i + 1)
-        plt.plot(np.arange(reference_eta.shape[1]) * dt, reference_eta[i + 3, :], label='Reference')
-        plt.plot(np.arange(real_eta.shape[0]) * dt, real_eta[:, i + 3], label='Real')
-        plt.ylabel(angle_labels[i])
-        plt.legend()
-        plt.grid(True)
-        if i == 0:
-            plt.title('Euler Angles: Reference vs Real')
-    plt.xlabel('Time [s]')
-    plt.tight_layout()
+def plot_vehicle_euler_angles_vs_reference_time(reference_eta, real_eta, dt):
+    # Plot real and reference positions x, y, z over time in separate subplots
+    n = real_eta.shape[0]
+    time = np.arange(n) * dt
+
+    fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    axs[0].plot(time, real_eta[:n, 3], label='roll (real)')
+    axs[0].plot(time, reference_eta[:n, 3], '--', label='roll (ref)')
+    axs[0].set_ylabel('phi [m]')
+    axs[0].legend()
+    axs[1].plot(time, real_eta[:n, 4], label='pitch (real)')
+    axs[1].plot(time, reference_eta[:n, 4], '--', label='pitch (ref)')
+    axs[1].set_ylabel('theta [m]')
+    axs[1].legend()
+    axs[2].plot(time, real_eta[:n, 5], label='yaw (real)')
+    axs[2].plot(time, reference_eta[:n, 5], '--', label='yaw (ref)')
+    axs[2].set_ylabel('psi [m]')
+    axs[2].set_xlabel('Time [s]')
+    axs[2].legend()
+    fig.suptitle('Real vs Reference Vehicle Attitude Over Time')
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
 
 def plot_velocities(real_nu, dt):
-    import matplotlib.pyplot as plt
     plt.figure(figsize=(10, 8))
     vel_labels = ['u (surge)', 'v (sway)', 'w (heave)', 'p (roll rate)', 'q (pitch rate)', 'r (yaw rate)']
     for i in range(6):
@@ -237,7 +264,6 @@ def plot_velocities(real_nu, dt):
     plt.show()
 
 def plot_control_inputs(u_optimal, dt):
-    import matplotlib.pyplot as plt
     plt.figure()
     for i in range(u_optimal.shape[0]):
         plt.subplot(u_optimal.shape[0], 1, i + 1)
@@ -249,4 +275,13 @@ def plot_control_inputs(u_optimal, dt):
             plt.xlabel('Time [s]')
         plt.grid(True)
     plt.tight_layout()
+    plt.show()
+
+def plot_jacobian_condition_number(jacobian_array, dt):
+    plt.figure()
+    plt.plot(np.arange(jacobian_array.shape[0]) * dt, jacobian_array)
+    plt.xlabel('Time [s]')
+    plt.ylabel('Jacobian Condition Number')
+    plt.title('Jacobian Condition Number over Time')
+    plt.grid(True)
     plt.show()
