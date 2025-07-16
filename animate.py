@@ -181,7 +181,7 @@ def plot_vehicle_pos_vs_reference_time(ref_positions, real_positions, dt):
     
     n = real_positions.shape[0]
     time = np.arange(n) * dt
-    
+
     fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
     axs[0].plot(time, real_positions[:n, 0], label='x (real)')
     axs[0].plot(time, ref_positions[:n, 0], '--', label='x (ref)')
@@ -198,6 +198,82 @@ def plot_vehicle_pos_vs_reference_time(ref_positions, real_positions, dt):
     axs[2].legend()
     fig.suptitle('Real vs Reference Vehicle Positions Over Time')
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+
+def plot_box_test():
+    # fake up some data
+    spread = np.random.rand(50) * 100
+    center = np.ones(25) * 50
+    flier_high = np.random.rand(10) * 100 + 100
+    flier_low = np.random.rand(10) * -100
+    data = np.concatenate((spread, center, flier_high, flier_low))
+
+    fig, axs = plt.subplots(2, 3)
+    # basic plot
+    axs[0, 0].boxplot(data)
+    axs[0, 0].set_title('basic plot')
+    plt.show()
+
+
+def plot_pose_error_boxplots(reference_eta, real_eta):
+    """
+    Compute position and attitude error norms between reference and real poses (Euler angles)
+    and plot the results as two boxplots in two figures next to each other.
+
+    Parameters:
+    - reference_eta: np.ndarray of shape (n_steps, 6), [x, y, z, phi, theta, psi]
+    - real_eta: np.ndarray of shape (n_steps, 6), [x, y, z, phi, theta, psi]
+    """
+    # Position error norm
+    pos_error = np.linalg.norm(reference_eta[:, :3] - real_eta[:, :3], axis=1)
+    # Attitude error norm (Euler angles, in radians)
+    att_error = np.linalg.norm(reference_eta[:, 3:] - real_eta[:, 3:], axis=1)
+    # Convert Euler angles to quaternions for all timesteps
+    reference_quat = R.from_euler('zyx', reference_eta[:, 5::-1][:, :3]).as_quat()  # [x, y, z, w]
+    real_quat = R.from_euler('zyx', real_eta[:, 5::-1][:, :3]).as_quat()
+
+    # Reorder to [w, x, y, z] for consistency with your functions
+    reference_quat = np.concatenate([reference_quat[:, 3:4], reference_quat[:, :3]], axis=1)
+    real_quat = np.concatenate([real_quat[:, 3:4], real_quat[:, :3]], axis=1)
+
+    def quat_mult_np(q1, q2):
+        # q1, q2: (..., 4) arrays, [w, x, y, z]
+        w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+        w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+        w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+        x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+        y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+        z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+        return np.stack([w, x, y, z], axis=-1)
+
+    att_error = []
+    for q_goal, q_current in zip(reference_quat, real_quat):
+        # Ensure shortest path
+        if np.dot(q_goal, q_current) < 0:
+            q_goal = -q_goal
+        q_current_conj = np.array([q_current[0], -q_current[1], -q_current[2], -q_current[3]])
+        q_err = quat_mult_np(q_goal, q_current_conj)
+        err_vec = 2 * q_err[1:4]
+        att_error.append(np.linalg.norm(err_vec))
+    att_error = np.array(att_error)
+
+    fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+
+    # Position Error Boxplot
+    axs[0].boxplot(pos_error)
+    axs[0].set_title('Position Error Norm')
+    axs[0].set_ylabel('Error [m]')
+    axs[0].set_xticks([1])
+    axs[0].set_xticklabels(['Position'])
+
+    # Attitude Error Boxplot
+    axs[1].boxplot(att_error)
+    axs[1].set_title('Attitude Error Norm')
+    axs[1].set_ylabel('Error [rad]')
+    axs[1].set_xticks([1])
+    axs[1].set_xticklabels(['Attitude'])
+
+    plt.tight_layout()
     plt.show()
 
 

@@ -1,7 +1,7 @@
 import casadi as ca
 import numpy as np
 import bluerov
-from animate import animate_bluerov, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
+from animate import animate_bluerov, plot_box_test, plot_pose_error_boxplots, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
 import time
 import matplotlib.pyplot as plt
 
@@ -350,6 +350,9 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
             q_real[n_dof:, step + 1], q_real[:n_dof, step + 1], *_ = bluerov.forward_dynamics_esc(
                 real_bluerov, u_esc=u_optimal[:, step], nu=q_real[n_dof:, step], eta=q_real[:n_dof, step], dt=dt, V_bat=V_bat
             )
+            # q_real[n_dof:, step + 1], q_real[:n_dof, step + 1], *_ = bluerov.forward_dynamics_esc_with_disturbance(
+            #     real_bluerov, u_esc=u_optimal[:, step], nu=q_real[n_dof:, step], eta=q_real[:n_dof, step], dt=dt, V_bat=V_bat
+            # )
         else:
             # returns nu, eta, nu_dot
             q_real[n_dof:, step + 1], q_real[:n_dof, step + 1], _ = bluerov.forward_dynamics(
@@ -450,35 +453,85 @@ def integrate_dynamics(symbolic_bluerov, nu_k, eta_k, u_k, dt, V_bat, use_pwm, u
             nu_next = state_next[0:nu_k.size1()]
             eta_next = state_next[nu_k.size1():]
         return nu_next, eta_next
+    elif integrator == 'semi_implicit_euler':
+        # Semi-implicit Euler
+        nu_dot, eta_dot = f(nu_k, eta_k)
+        nu_next = nu_k + dt * nu_dot
+        eta_dot_new = J_fun(eta_k) @ nu_next
+        eta_next = eta_k + dt * eta_dot_new
+        if use_quaternion:
+            # Normalize quaternion part
+            pos_next = eta_next[0:3]
+            quat_next = eta_next[3:]
+            quat_next = quat_next / ca.norm_2(quat_next)
+            eta_next = ca.vertcat(pos_next, quat_next)
+        return nu_next, eta_next
+
 
     else:
         raise ValueError(f"Unknown integrator type: {integrator}")
     
+# def quaternion_error(q_goal, q_current):
+#     # Use CasADi's if_else for symbolic logic
+#     dot_prod = ca.dot(q_goal, q_current)
+#     q_goal_adj = ca.if_else(dot_prod < 0, -q_goal, q_goal)
+#     w_g = q_goal_adj[0]
+#     x_g = q_goal_adj[1]
+#     y_g = q_goal_adj[2]
+#     z_g = q_goal_adj[3]
+#     w_c = q_current[0]
+#     x_c = q_current[1]
+#     y_c = q_current[2]
+#     z_c = q_current[3]
+#     v_g = ca.vertcat(x_g, y_g, z_g)
+#     v_c = ca.vertcat(x_c, y_c, z_c)
+#     goal_att_tilde = ca.vertcat(
+#         ca.horzcat(0, -z_g, y_g),
+#         ca.horzcat(z_g, 0, -x_g),
+#         ca.horzcat(-y_g, x_g, 0)
+#     )
+#     att_error = ca.mtimes(w_g, v_c) - ca.mtimes(w_c, v_g) - ca.mtimes(goal_att_tilde, v_c)
+#     return att_error
+
+
+# def quat_mult(q1, q2):
+#     w1, x1, y1, z1 = q1[0], q1[1], q1[2], q1[3]
+#     w2, x2, y2, z2 = q2[0], q2[1], q2[2], q2[3]
+#     w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+#     x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+#     y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+#     z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+#     return ca.vertcat(w, x, y, z)
+
+# def quaternion_error(q_goal, q_current):
+#     # Ensure shortest path
+#     dot_prod = ca.dot(q_goal, q_current)
+#     q_goal_adj = ca.if_else(dot_prod < 0, -q_goal, q_goal)
+#     q_current_conj = ca.vertcat(q_current[0], -q_current[1], -q_current[2], -q_current[3])
+#     q_err = quat_mult(q_goal_adj, q_current_conj)
+#     return 2 * q_err[1:4]  # Vektoranteil als Fehler
+
+def quat_mult(q1, q2):
+    # Hamilton-Produkt zweier Quaternionen
+    w1, x1, y1, z1 = q1[0], q1[1], q1[2], q1[3]
+    w2, x2, y2, z2 = q2[0], q2[1], q2[2], q2[3]
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    return ca.vertcat(w, x, y, z)
+
 def quaternion_error(q_goal, q_current):
-        w_g = q_goal[0]
-        x_g = q_goal[1]
-        y_g = q_goal[2]
-        z_g = q_goal[3]
-        w_c = q_current[0]
-        x_c = q_current[1]
-        y_c = q_current[2]
-        z_c = q_current[3]
-        v_g = ca.vertcat(x_g, y_g, z_g)
-        v_c = ca.vertcat(x_c, y_c, z_c)
-        goal_att_tilde = ca.vertcat(
-            ca.horzcat(0, -z_g, y_g),
-            ca.horzcat(z_g, 0, -x_g),
-            ca.horzcat(-y_g, x_g, 0)
-        )
-        att_error = ca.mtimes(w_g, v_c) - ca.mtimes(w_c, v_g) - ca.mtimes(goal_att_tilde, v_c)
-        return att_error
+    # Kürzeste Verbindung auf der Quaternionen-Sphäre wählen
+    q_goal_adj = ca.if_else(ca.dot(q_goal, q_current) < 0, -q_goal, q_goal)
+    # Konjugierte von q_current
+    q_current_conj = ca.vertcat(q_current[0], -q_current[1], -q_current[2], -q_current[3])
+    # Fehlerquaternion
+    q_err = quat_mult(q_goal_adj, q_current_conj)
+    # Vektoranteil als Fehler (für kleine Winkel proportional zur Rotationsachse)
+    return 2 * q_err[1:4]
 
 def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0, n_thruster, V_bat, use_pwm, use_quaternion, integrator, opts, prev_g):
-    # TODO: ich berechne mir ja auch ein q_predict, übernehme das in die nächste Optimierung und setze es als Startwert für q, also nicht
-    # immer q0 asl STratwert für alles nehmen. Wobei q_predict der erste Wert durch q0 ersetzt werden sollte, also dem echten state
-    # oder ist es vielleicht besser q0 weiterhin als erstes aber die restlichen elemente von reference trajectory zu nehmen? wobei dort kein twist dabei ist...
-    
-    
     opti = ca.Opti()
     if opts is None:
         raise ValueError("Solver options 'opts' must be provided.")
@@ -487,6 +540,10 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
     q = opti.variable(state_dim, N + 1)
     u = opti.variable(n_thruster if use_pwm else n_dof, N)
     slack = opti.variable(u.shape[0])
+
+    # integral error
+    # e_int = opti.variable(6, N+1)
+    # opti.subject_to(e_int[:, 0] == 0)
 
     # Initial state constraint
     opti.subject_to(q[:, 0] == ca.DM(q_init[:, 0]))
@@ -519,13 +576,36 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
         else:
             opti.subject_to(u[:, k] <= 25.0 + slack)
             opti.subject_to(u[:, k] >= -25.0 - slack)
+            # Terminal constraint (soft, with new slack variable)
+    
+    # Terminal constraint: position and attitude error (via quaternion)
+    # slack_terminal_pos = opti.variable(3)
+    # slack_terminal_att = opti.variable(3)
+    # ref_terminal = ca.DM(reference_trajectory[:, -1])
+    # opti.subject_to(slack_terminal_pos >= 0)
+    # opti.subject_to(q[n_dof:n_dof+3, N] - ref_terminal[0:3] <= slack_terminal_pos)
+    # opti.subject_to(q[n_dof:n_dof+3, N] - ref_terminal[0:3] >= -slack_terminal_pos)
+    # opti.subject_to(slack_terminal_att >= 0)
+    # if use_quaternion:
+    #     att_error_terminal = quaternion_error(ref_terminal[3:], q[n_dof+3:, N])
+    # else:
+    #     ref_quat_terminal = euler_to_quat_casadi(*ref_terminal[3:6])
+    #     roll_t, pitch_t, yaw_t = ca.vertsplit(q[n_dof+3:, N])
+    #     curr_quat_terminal = euler_to_quat_casadi(roll_t, pitch_t, yaw_t)
+    #     att_error_terminal = quaternion_error(ref_quat_terminal, curr_quat_terminal)
+    # opti.subject_to(att_error_terminal <= slack_terminal_att)
+    # opti.subject_to(att_error_terminal >= -slack_terminal_att)
+
+    
 
     # --- Cost Function (Compact & Efficient) ---
     # Weights
     Q_pos = 5.0 * ca.DM.eye(3)
     Q_att = 5.0 * ca.DM.eye(3)
+    # Q_int = 0.5 * ca.DM.eye(6)  # Adjust as needed
     R_input = 0.01 * ca.DM.eye(u.shape[0])
-    R_delta_u = 0.1 * ca.DM.eye(u.shape[0])  # Weight for control smoothness
+    # R_input = ca.DM.zeros(u.shape[0], u.shape[0]) # only punishing state, doesnt really improve, so maybe it is the system that cant respond fast enough or the horizion is too short
+    # R_delta_u = 0.001 * ca.DM.eye(u.shape[0])  # Weight for control smoothness
 
     cost = 0
     for k in range(N):
@@ -545,16 +625,39 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
 
         # Control effort
         cost += ca.dot(u[:, k], R_input @ u[:, k])
-
+    
         # Control smoothness (delta u)
         # if k > 0:
         #     delta_u = u[:, k] - u[:, k-1]
         #     cost += ca.dot(delta_u, R_delta_u @ delta_u)
 
+        # accumulated error / integrated cost on pose error
+        # without: small biases tolerated and system has no pressureto correct drift
+        # e_int[:, k+1] = e_int[:, k] + dt * ca.vertcat(pos_error, att_error)
+        # cost += ca.dot(e_int[:, k+1], Q_int @ e_int[:, k+1]) # k=0 is just 0
+
+        # Terminal cost (soft, includes slack)
+        # bringt gefühlt gar nichts, keinen Unterschied, egal wie hoch die Gewichtung ist zwischen *0.1 und *10
+        # if k == N - 1:
+        #     pos_error_terminal = q[n_dof:n_dof+3, k+1] - reference_trajectory[0:3, k]
+        #     cost += ca.dot(pos_error_terminal, 10*Q_pos @ pos_error_terminal)
+        #     if use_quaternion:
+        #         att_error_terminal = quaternion_error(reference_trajectory[3:, k], q[n_dof+3:, k+1])
+        #     else:
+        #         ref_quat_terminal = euler_to_quat_casadi(*reference_trajectory[3:, k])
+        #         roll_t, pitch_t, yaw_t = ca.vertsplit(q[n_dof+3:, k+1])
+        #         curr_quat_terminal = euler_to_quat_casadi(roll_t, pitch_t, yaw_t)
+        #         att_error_terminal = quaternion_error(ref_quat_terminal, curr_quat_terminal)
+        #     cost += ca.dot(att_error_terminal, 10*Q_att @ att_error_terminal)
+
+        
+
         # Add high penalty for slack in cost
         cost += 1e2 * ca.sumsqr(slack)
+        #terminal slack
+        # cost += 1e4 * (ca.sumsqr(slack_terminal_pos) + ca.sumsqr(slack_terminal_att))
 
-    opti.callback(lambda _: print("Current cost:", opti.debug.value(cost)))
+    # opti.callback(lambda _: print("Current cost:", opti.debug.value(cost)))
     opti.minimize(cost)
 
     # Warm start dual variables if available
@@ -576,9 +679,10 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
 # --- Main Function ---
 
 def main():
-    bluerov_params = bluerov.load_model_params('model_params.yaml')
-    bluerov_dynamics = bluerov.BlueROVDynamics(bluerov_params)
-    bluerov_symbolic = BlueROVDynamicsSymbolic(bluerov_params)
+    bluerov_params_symbolic = bluerov.load_model_params('model_params.yaml')
+    bluerov_params_dynamic = bluerov.load_model_params('model_params_disturbed.yaml')
+    bluerov_dynamics = bluerov.BlueROVDynamics(bluerov_params_dynamic)
+    bluerov_symbolic = BlueROVDynamicsSymbolic(bluerov_params_symbolic)
 
     T = 20.0
     fps = 20
@@ -593,7 +697,8 @@ def main():
         1: 'rk4_coupled_coordinates', # improves slightly over explicit euler, but sloooooow
         2: 'rk4_decoupled_coordinates',
         3: 'CasADi_integrator', # Lösung ergibt überhaupt keinen Sinn
-        4: 'rk4_coupled_function'
+        4: 'rk4_coupled_function',
+        5: 'semi_implicit_euler'
     }
     integrator = integrator_dict.get(0)
 
@@ -606,13 +711,20 @@ def main():
     # nu = [u, v, w, p, q, r] (linear and angular velocities)
     # reference_eta = bluerov.generate_circle_trajectory_time(T=T, dt=dt, n=n).T
 
-    start = np.array([0.0, 0.0, -1.0])  # [x, y, z, roll, pitch, yaw]
+    reference_eta = bluerov.generate_sine_on_circle_trajectory_time(T=T, dt=dt, n=n).T
+
+    # start = np.array([0.0, 0.0, -1.0])  # [x, y, z, roll, pitch, yaw]
     # end = np.array([-4.24, 4.24, -1.0]) # 5/4 pi
-    # end = np.array([-4.24, -4.24, -1.0]) # -5/4 pi
+    # # end = np.array([-4.24, -4.24, -1.0]) # -5/4 pi
+    # # end = np.array([4, 5, -1.0])
+    # # end = np.array([-6, 0, -1.0]) # +-pi
     # end = np.array([4, 5, -1.0])
-    # end = np.array([-6, 0, -1.0]) # +-pi
-    end = np.array([4, 5, -1.0])
-    reference_eta = bluerov.generate_linear_trajectory(start, end, T, dt).T
+    # reference_eta = bluerov.generate_linear_trajectory(start, end, T, dt).T
+
+    # reference_eta: shape (6, T), [x, y, z, roll, pitch, yaw]
+    reference_eta[3, :] = np.unwrap(reference_eta[3, :])  # roll
+    reference_eta[4, :] = np.unwrap(reference_eta[4, :])  # pitch
+    reference_eta[5, :] = np.unwrap(reference_eta[5, :])  # yaw
 
 
     real_traj, cost, u_optimal = run_mpc(
@@ -625,6 +737,18 @@ def main():
     real_nu = real_traj[6:, :-1].T
     reference_eta = reference_eta.T
 
+    # Ensure all trajectories have the same length (number of rows)
+    min_len = min(real_eta.shape[0], real_nu.shape[0], reference_eta.shape[0])
+    if real_eta.shape[0] != min_len:
+        print(f"Trimming real_eta from {real_eta.shape[0]} to {min_len} rows.")
+        real_eta = real_eta[:min_len]
+    if real_nu.shape[0] != min_len:
+        print(f"Trimming real_nu from {real_nu.shape[0]} to {min_len} rows.")
+        real_nu = real_nu[:min_len]
+    if reference_eta.shape[0] != min_len:
+        print(f"Trimming reference_eta from {reference_eta.shape[0]} to {min_len} rows.")
+        reference_eta = reference_eta[:min_len]
+
     # Call plotting functions
     plot_delta_u(u_optimal, dt)
     plot_mpc_cost(cost, dt)
@@ -632,6 +756,7 @@ def main():
     plot_vehicle_euler_angles_vs_reference_time(reference_eta, real_eta, dt)
     plot_velocities(real_nu, dt)
     plot_control_inputs(u_optimal, dt)
+    plot_pose_error_boxplots(reference_eta, real_eta)
     animate_bluerov(real_eta, dt=dt)
 
 if __name__ == "__main__":

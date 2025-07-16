@@ -291,8 +291,48 @@ def forward_dynamics_esc(dynamics, u_esc, nu, eta, dt, V_bat=16.0):
 
     # integrate to get new pose
     eta = eta + dt * rigid_body_jacobian_euler(eta) @ nu
+    # eta[3] = normalize_angle(eta[3])  # phi
+    # eta[4] = np.clip(eta[4], -np.pi/2 + 1e-6, np.pi/2 - 1e-6)  # theta, falls nötig
+    # eta[5] = normalize_angle(eta[5])  # psi
 
     return nu, eta, nu_dot, tau
+
+def forward_dynamics_esc_with_disturbance(
+    dynamics, u_esc, nu, eta, dt, V_bat=16.0, disturbance_prob=0.1, force_max=40.0, torque_max=40.0
+):
+    """
+    Like forward_dynamics_esc, but randomly adds external disturbance tau_dist.
+    With probability disturbance_prob, tau_dist is a random 6D vector:
+    - first 3: force in [-force_max, force_max] N
+    - last 3: torque in [-torque_max, torque_max] Nm
+    """
+    tau = dynamics.mixer @ u_esc * dynamics.L * V_bat
+
+    # Randomly decide whether to add disturbance
+    if np.random.rand() < disturbance_prob:
+        tau_dist = np.zeros(6)
+        tau_dist[:3] = np.random.uniform(-force_max, force_max, 3)
+        tau_dist[3:] = np.random.uniform(-torque_max, torque_max, 3)
+    else:
+        tau_dist = np.zeros(6)
+
+    tau_total = tau + tau_dist
+
+    nu_dot = np.linalg.inv(dynamics.M) @ (
+        tau_total - dynamics.C(nu) @ nu - dynamics.D(nu) @ nu - dynamics.g(eta)
+    )
+    nu = nu + dt * nu_dot
+    eta = eta + dt * rigid_body_jacobian_euler(eta) @ nu
+
+    # eta[3] = normalize_angle(eta[3])  # phi
+    # eta[4] = np.clip(eta[4], -np.pi/2 + 1e-6, np.pi/2 - 1e-6)  # theta, falls nötig
+    # eta[5] = normalize_angle(eta[5])  # psi
+
+    return nu, eta, nu_dot, tau_total
+
+def normalize_angle(angle):
+    """Normiert einen Winkel auf [-pi, pi]."""
+    return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
 def inverse_dynamics(dynamics, nu_dot, nu, eta):
