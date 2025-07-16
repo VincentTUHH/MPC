@@ -11,45 +11,48 @@ from scipy.spatial.transform import Rotation as Rot
 class BlueROVDynamics:
     def __init__(self, params):
         self.mass = params['mass']
-        self.inertia = np.array(params['inertia']) #
-        self.cog = np.array(params['cog']) # center of gravity
-        self.added_mass = np.array(params['added_mass']) # Added mass is a vector of 6 elements, one for each degree of freedom
+        self.inertia = np.array(params['inertia'])
+        self.cog = np.array(params['cog'])
+        self.added_mass = np.array(params['added_mass'])
         self.buoyancy = params['buoyancy']
-        self.cob = np.array(params['cob']) # center of buoyancy
+        self.cob = np.array(params['cob'])
         self.damping_linear = np.array(params['damping_linear'])
         self.damping_nonlinear = np.array(params['damping_nonlinear'])
         self.gravity = 9.81
+        self.L = 2.5166  # scaling factor for PWM to thrust conversion
 
         self.M = self.compute_mass_matrix()
+        self.M_inv = np.linalg.pinv(self.M)
 
-        # # Thruster geometry parameters (from YAML)
-        # alpha_f = 0.733   # 42 / 180 * pi
-        # alpha_r = 0.8378  # 48 / 180 * pi
-        # l_hf = 0.163
-        # l_hr = 0.177
-        # l_vx = 0.12
-        # l_vy = 0.218
+        self.mixer = self.get_mixer_matrix_wu2018()
+        self.mixer_inv = np.linalg.pinv(self.mixer)
 
-        # calpha_f = np.cos(alpha_f)
-        # salpha_f = np.sin(alpha_f)
-        # calpha_r = np.cos(alpha_r)
-        # salpha_r = np.sin(alpha_r)
+    def get_mixer_matrix_niklas(self):
+        alpha_f = 0.733
+        alpha_r = 0.8378
+        l_hf = 0.163
+        l_hr = 0.177
+        l_vx = 0.12
+        l_vy = 0.218
 
-        # # Mixer matrix for thrusters (purely geometrical, for tau = [forces, moments])
-        # self.mixer = np.array([
-        #     [calpha_f, calpha_f  , calpha_r  , calpha_r , 0     , 0     , 0     , 0   ],
-        #     [salpha_f, -salpha_f , -salpha_r , salpha_r , 0     , 0     , 0     , 0   ],
-        #     [0       , 0         , 0         , 0        , 1     , -1    , -1    , 1   ],
-        #     [0       , 0         , 0         , 0        , -l_vy , -l_vy , l_vy  , l_vy],
-        #     [0       , 0         , 0         , 0        , -l_vx , l_vx  , -l_vx , l_vx],
-        #     [l_hf    , -l_hf     , l_hr      , -l_hr    , 0     , 0     , 0     , 0   ]
-        # ])
+        calpha_f = np.cos(alpha_f)
+        salpha_f = np.sin(alpha_f)
+        calpha_r = np.cos(alpha_r)
+        salpha_r = np.sin(alpha_r)
 
+        mixer = np.array([
+            [calpha_f, calpha_f, calpha_r, calpha_r, 0, 0, 0, 0],
+            [salpha_f, -salpha_f, -salpha_r, salpha_r, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, -1, -1, 1],
+            [0, 0, 0, 0, -l_vy, -l_vy, l_vy, l_vy],
+            [0, 0, 0, 0, -l_vx, l_vx, -l_vx, l_vx],
+            [l_hf, -l_hf, l_hr, -l_hr, 0, 0, 0, 0]
+        ])
+        return mixer
 
-        # Thruster geometry parameters (from Wu 2018)
+    def get_mixer_matrix_wu2018(self):
         alpha_f = np.pi / 4
         alpha_r = np.pi / 4
-        # unit direction of thrust
         n1 = np.array([np.cos(alpha_f), np.sin(alpha_f), 0])
         n2 = np.array([np.cos(alpha_f), -np.sin(alpha_f), 0])
         n3 = np.array([np.cos(alpha_r), -np.sin(alpha_r), 0])
@@ -58,7 +61,6 @@ class BlueROVDynamics:
         n6 = np.array([0, 0, -1])
         n7 = np.array([0, 0, -1])
         n8 = np.array([0, 0, 1])
-        # thruster lever arms (from Wu 2018)
         l_xt = 0.156
         l_yt = 0.111
         l_zt = 0.0
@@ -74,129 +76,126 @@ class BlueROVDynamics:
         l7 = np.array([-l_xb, -l_yb, -l_zb])
         l8 = np.array([-l_xb, l_yb, -l_zb])
 
-        # Compute mixer matrix using numpy cross product for thrust directions and lever arms
-        n_list = [n1, n2, n3, n4, n5, n6, n7, n8]
-        l_list = [l1, l2, l3, l4, l5, l6, l7, l8]
-        n_arr = np.stack(n_list, axis=1)  # shape (3, 8)
-        l_arr = np.stack(l_list, axis=1)  # shape (3, 8)
-        cross_arr = np.cross(l_arr.T, n_arr.T).T  # shape (3, 8)
-        self.mixer = np.vstack([n_arr, cross_arr])  # shape (6, 8)
-        self.mixer = np.where(np.abs(self.mixer) < 1e-6, 0.0, self.mixer)  # enforce exact zeros
+        n_arr = np.stack([n1, n2, n3, n4, n5, n6, n7, n8], axis=1)
+        l_arr = np.stack([l1, l2, l3, l4, l5, l6, l7, l8], axis=1)
+        cross_arr = np.cross(l_arr.T, n_arr.T).T
+        mixer = np.vstack((n_arr, cross_arr))
+        mixer[np.abs(mixer) < 1e-6] = 0.0
+        return mixer
 
-        self.mixer_inv = np.linalg.pinv(self.mixer)
-
-        self.L = 2.5166 # scaling factor for PWM to thrust conversion
-
-    
     def compute_mass_matrix(self):
         M_rb = np.zeros((6, 6))
         M_rb[0:3, 0:3] = self.mass * np.eye(3)
-        M_rb[0:3, 3:6] = -self.mass * skew_symmetric(self.cog) # self.cog is the vector from body-fixed frame to the center of gravity expressed in the body-fixed frame
+        M_rb[0:3, 3:6] = -self.mass * skew_symmetric(self.cog)
         M_rb[3:6, 0:3] = self.mass * skew_symmetric(self.cog)
-        # inertia tensor with respect to the center of gravity - Steiner's theorem to account for the offset of the center of gravity, 
-        # when reference system for the generalized coordinates 
-        M_rb[3:6, 3:6] = np.diag(self.inertia) - self.mass * skew_symmetric(self.cog) @ skew_symmetric(self.cog)         
+        M_rb[3:6, 3:6] = np.diag(self.inertia) - self.mass * skew_symmetric(self.cog) @ skew_symmetric(self.cog)
         M = M_rb + np.diag(self.added_mass)
         return M
 
-    def D(self, nu): # Damping matrix
+    def D(self, nu):
         D = np.zeros((6, 6))
         D[np.diag_indices(6)] = self.damping_linear + self.damping_nonlinear * np.abs(nu)
         return D
 
-    def g(self, eta): # gravitational and buoyancy forces + moments
-        # eta is the pose vector [x, y, z, phi, theta, psi]
-        # gravitational and buoyancy forces are computed in the body frame
-        phi, theta, psi = eta[3:6]
-        # Compute rotation matrix from Euler angles (phi, theta, psi)
+    def C(self, nu):
+        C = np.zeros((6, 6))
+        v = nu[0:3]
+        w = nu[3:6]
+        mv = self.M[0:3, 0:3] @ v + self.M[0:3, 3:6] @ w
+        mw = self.M[3:6, 0:3] @ v + self.M[3:6, 3:6] @ w
+        C[0:3, 3:6] = -skew_symmetric(mv)
+        C[3:6, 0:3] = -skew_symmetric(mv)
+        C[3:6, 3:6] = -skew_symmetric(mw)
+        return C
+
+    def rotation_matrix_from_euler(self, phi, theta, psi):
         cphi = np.cos(phi)
         sphi = np.sin(phi)
         ctheta = np.cos(theta)
         stheta = np.sin(theta)
         cpsi = np.cos(psi)
         spsi = np.sin(psi)
-        # R = np.array([
-        #     [ctheta * cpsi, ctheta * spsi, -stheta],
-        #     [sphi * stheta * cpsi - cphi * spsi, sphi * stheta * spsi + cphi * cpsi, sphi * ctheta],
-        #     [cphi * stheta * cpsi + sphi * spsi, cphi * stheta * spsi - sphi * cpsi, cphi * ctheta]
-        # ])
-        #######!!!!! -> Diese Berechnung von R scheint nicht richtig zu sein, oder (weil ich from_euler in animation nutze)
-        # und diese Funtion falsch ist, hat es nicht richtig funtioniert
+        R = np.array([
+            [cpsi * ctheta, cpsi * stheta * sphi - spsi * cphi, cpsi * stheta * cphi + spsi * sphi],
+            [spsi * ctheta, spsi * stheta * sphi + cpsi * cphi, spsi * stheta * cphi - cpsi * sphi],
+            [-stheta,        ctheta * sphi,                     ctheta * cphi]
+        ])
+        return R
+    
+    def rotation_matrix_from_quat(self, q):
+        """
+        Convert quaternion [x, y, z, w] to rotation matrix (3x3).
+        """
+        return Rot.from_quat(q).as_matrix()
 
-        # R = Rot.from_euler('xyz', [phi, theta, psi]).as_matrix()
-
-        R = Rot.from_euler('zyx', [psi, theta, phi]).as_matrix()
-
+    def g(self, eta):
+        phi, theta, psi = eta[3:]
+        R = self.rotation_matrix_from_euler(phi, theta, psi)
         fg = self.mass * R.T @ np.array([0, 0, -self.gravity])
         fb = self.buoyancy * R.T @ np.array([0, 0, self.gravity])
         g_vec = np.zeros(6)
         g_vec[0:3] = -(fg + fb)
-        # Moments due to the forces acting at the center of gravity and center of buoyancy
-        # then create moments with respect to the body frame (as everything expressed in the body frame)
-        # a gravitaional force acts at the center of gravity and does not create an active moment that would tilt the vehicle
-        # but from looking at the gravitational force from reference point that single graviational force creates a moment with respect to the reference point
-        # but as there is no active moment a counteracting gravitational moment is needed to keep the vehicle in equilibrium, hence the negative sign
-        # the same applies to the buoyancy force
-        g_vec[3:6] = -(np.cross(self.cog, fg) + np.cross(self.cob, fb)) ##### das war vorher negativ, aber ohne - wirkt es richtig
+        g_vec[3:6] = -(np.cross(self.cog, fg) + np.cross(self.cob, fb))
+        return g_vec
+    
+    def g_quat(self, eta):
+        """
+        Gravity and buoyancy vector for quaternion-based pose.
+        eta: [x, y, z, qx, qy, qz, qw]
+        Returns: g_vec (6,)
+        """
+        q = eta[3:]
+        R = self.rotation_matrix_from_quat(q)
+        fg = self.mass * R.T @ np.array([0, 0, -self.gravity])
+        fb = self.buoyancy * R.T @ np.array([0, 0, self.gravity])
+        g_vec = np.zeros(6)
+        g_vec[0:3] = -(fg + fb)
+        g_vec[3:6] = -(np.cross(self.cog, fg) + np.cross(self.cob, fb))
         return g_vec
 
-    def C(self, nu): # Coriolis-centripetal matrix: forces due to the motion of the vehicle
-        C = np.zeros((6, 6))
-        velocity = nu[:3]  # Linear velocities [u, v, w]
-        angular_velocity = nu[3:]  # Angular velocities [p, q, r]
-        # Compute the Coriolis forces based on the velocity and angular velocity
-        C[0:3, 3:6] = - skew_symmetric(self.M[0:3, 0:3] @ velocity + self.M[0:3, 3:6] @ angular_velocity)
-        C[3:6, 0:3] = - skew_symmetric(self.M[0:3, 0:3] @ velocity + self.M[0:3, 3:6] @ angular_velocity)
-        C[3:6, 3:6] = - skew_symmetric(self.M[3:6, 0:3] @ velocity + self.M[3:6, 3:6] @ angular_velocity)
-        return C
-    
+    def J(self, eta):
+        phi, theta, psi = eta[3], eta[4], eta[5]
+        R = self.rotation_matrix_from_euler(phi, theta, psi)
+        cphi = np.cos(phi)
+        sphi = np.sin(phi)
+        ctheta = np.cos(theta)
+        stheta = np.sin(theta)
+        T = np.array([
+            [1, sphi * stheta / ctheta, cphi * stheta / ctheta],
+            [0, cphi, -sphi],
+            [0, sphi / ctheta, cphi / ctheta]
+        ])
+        J = np.zeros((6, 6))
+        J[0:3, 0:3] = R
+        J[3:6, 3:6] = T
+        return J
+
+    def J_quat(self, eta):
+        """
+        Jacobian for quaternion-based pose representation.
+        eta: [x, y, z, qx, qy, qz, qw]
+        Returns: J (6,6) mapping body velocities to pose derivatives.
+        """
+        q = eta[3:7]
+        R = self.rotation_matrix_from_quat(q)
+        # Quaternion kinematics matrix
+        qx, qy, qz, qw = q
+        G = 0.5 * np.array([
+            [-qx, -qy, -qz],
+            [ qw, -qz,  qy],
+            [ qz,  qw, -qx],
+            [-qy,  qx,  qw]
+        ])
+        J = np.zeros((7, 6))
+        J[0:3, 0:3] = R
+        J[3:7, 3:6] = G
+        return J
+
     def tau_to_thrusts(self, tau):
-        """
-        Maps desired wrench tau (6,) to individual thruster commands (8,) using the mixer matrix.
-        Args:
-            tau: np.array, desired wrench [forces; moments] (6,)
-        Returns:
-            thrusts: np.array, thruster commands (8,)
-        """
         return self.mixer_inv @ tau
-    
-    def thrusts_to_pwm(self, thrusts): #  nur von copilot ohne mich
-        """
-        Maps thrust values (N) to PWM signals (μs) for BlueRobotics T200 thrusters.
-        Assumes symmetric mapping for forward/reverse thrust.
-        Returns PWM values clipped to [1100, 1900] μs.
 
-        Args:
-            thrusts: np.array, desired thrusts (8,)
-
-        Returns:
-            pwm: np.array, PWM signals (8,)
-        """
-        # T200: ~-29N @ 1100μs, 0N @ 1500μs, +29N @ 1900μs (approximate, linearized)
-        thrust_min = -29.0
-        thrust_max = 29.0
-        pwm_min = 1100
-        pwm_max = 1900
-        pwm_neutral = 1500
-
-        pwm = pwm_neutral + (thrusts / thrust_max) * (pwm_max - pwm_neutral)
-        pwm = np.clip(pwm, pwm_min, pwm_max)
-        return pwm
-    
-    def thrusts_to_pwm_teensy(self, thrusts, thrust_max=29.0, pwm_min=1100, pwm_max=1900):
-        """
-        Maps thrust values (N) to PWM signals (μs) using the same linear mapping as TeensyCommander::ApplyLinearInputMapping.
-        Args:
-            thrusts: np.array, desired thrusts (8,)
-            thrust_max: float, maximum absolute thrust (N)
-            pwm_min: int, minimum PWM value (μs)
-            pwm_max: int, maximum PWM value (μs)
-        Returns:
-            pwm: np.array, PWM signals (8,)
-        """
-        # Map thrust [-thrust_max, thrust_max] to input [-1, 1]
-        input_norm = np.clip(thrusts / thrust_max, -1.0, 1.0)
-        pwm = 1500 + 400 * input_norm
+    def thrusts_to_pwm(self, thrusts, thrust_max=29.0, pwm_min=1100, pwm_max=1900):
+        pwm = 1500 + 400 * np.clip(thrusts / thrust_max, -1.0, 1.0)
         pwm = np.clip(pwm, pwm_min, pwm_max)
         return pwm
 

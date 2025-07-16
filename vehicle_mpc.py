@@ -3,7 +3,7 @@ import numpy as np
 import bluerov
 from animate import animate_bluerov, plot_box_test, plot_pose_error_boxplots, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
 import time
-import matplotlib.pyplot as plt
+from scipy.linalg import solve_continuous_are
 
 # --- Utility Functions ---
 class BlueROVDynamicsSymbolic:
@@ -235,9 +235,39 @@ def skew_symmetric_symbolic(v):
         ca.horzcat(-v[1], v[0], 0)
     )
 
+def compute_lqr_gain(A, B, Q=None, R=None):
+    # Q, R can be tuned; default to identity
+    n = A.shape[0]  
+    m = B.shape[1]
+    if Q is None:
+        Q = 5.0 * np.eye(n)
+    if R is None:
+        R = 0.01 * np.eye(m)
+    P = solve_continuous_are(A, B, Q, R)
+    K = np.linalg.inv(R) @ B.T @ P
+    return K
+
+def linearize_system(f, x0, u0, eps=1e-6):
+    n = x0.size
+    m = u0.size
+    A = np.zeros((n, n))
+    B = np.zeros((n, m))
+    fx0u0 = f(x0, u0)
+    # Compute A matrix
+    for i in range(n):
+        dx = np.zeros_like(x0)
+        dx[i] = eps
+        A[:, i] = (f(x0 + dx, u0) - fx0u0) / eps
+    # Compute B matrix
+    for j in range(m):
+        du = np.zeros_like(u0)
+        du[j] = eps
+        B[:, j] = (f(x0, u0 + du) - fx0u0) / eps
+    return A, B
+
 # --- Main MPC Function ---
 
-def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, dt, N, integrator, opts, use_pwm=False, use_quaternion=False, V_bat=16.0):
+def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, dt, N, integrator, opts, use_pwm=False, use_quaternion=False, use_tube_mpc=False, V_bat=16.0):
     M = int(T_trajectory / dt)
     n_dof = 6
     n_thruster = 8
@@ -324,22 +354,38 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
             q_init[:, 0] = q0
 
         # Solve optimal control problem
-        if step == 0:
-            # First step: no warm start
-            q_opt, u_optimal_horizon, Jopt, prev_g = solve_cftoc(
+        q_opt, u_optimal_horizon, Jopt, prev_g = solve_cftoc(
             N, n_dof, symbolic_bluerov, q_init, ref_traj_horizon, dt,
             u0, n_thruster, V_bat, use_pwm, use_quaternion, 
             integrator, opts, prev_g
-            )
-        else:
-            # Warm start using previous solver
-            q_opt, u_optimal_horizon, Jopt, prev_g = solve_cftoc(
-            N, n_dof, symbolic_bluerov, q_init, ref_traj_horizon, dt,
-            u0, n_thruster, V_bat, use_pwm, use_quaternion, 
-            integrator, opts, prev_g
-            )
+        )
 
-        u_optimal[:, step] = u_optimal_horizon[:, 0]
+        if use_tube_mpc:
+            u_star = u_optimal_horizon[:, 0]
+
+            # --- Tube MPC: Feedback Correction ---
+            # Linearize system at current operating point
+            x0 = q_real[:, step]
+            u_lin = np.zeros(n_thruster if use_pwm else n_dof)
+            def f(x, u):
+                nu = x[:n_dof]
+                eta = x[n_dof:]
+                nu_next, eta_next = integrate_dynamics(
+                    symbolic_bluerov, nu, eta, u, dt, V_bat, use_pwm, False, integrator
+                )
+                nu_next = np.array(nu_next, dtype=float).flatten()
+                eta_next = np.array(eta_next, dtype=float).flatten()
+                x_next = np.concatenate([nu_next, eta_next])
+                return x_next
+            A, B = linearize_system(f, x0, u_lin)
+            K = compute_lqr_gain(A, B)
+
+            error = reference_trajectory[:, step] - q_real[:, step]
+            u_optimal[:, step] = u_star + K @ error[:K.shape[1]]
+        else:
+            # No feedback correction, use optimal control directly
+            u_optimal[:, step] = u_optimal_horizon[:, 0]
+   
         u0 = np.hstack([u_optimal_horizon[:, 1:], u_optimal_horizon[:, -1][:, np.newaxis]])
         cost[step] = Jopt
         q_predict[:, :, step] = q_opt
@@ -603,7 +649,7 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
     Q_pos = 5.0 * ca.DM.eye(3)
     Q_att = 5.0 * ca.DM.eye(3)
     # Q_int = 0.5 * ca.DM.eye(6)  # Adjust as needed
-    R_input = 0.01 * ca.DM.eye(u.shape[0])
+    R_input = 0.02 * ca.DM.eye(u.shape[0])
     # R_input = ca.DM.zeros(u.shape[0], u.shape[0]) # only punishing state, doesnt really improve, so maybe it is the system that cant respond fast enough or the horizion is too short
     # R_delta_u = 0.001 * ca.DM.eye(u.shape[0])  # Weight for control smoothness
 
@@ -692,6 +738,7 @@ def main():
 
     use_quaternion = True  # Switch between Euler and quaternion model for MPC
     use_pwm = True         # Switch between tau and PWM control
+    use_tube_mpc = False  # Use Tube MPC for feedback correction
     integrator_dict = {
         0: 'explicit_euler',
         1: 'rk4_coupled_coordinates', # improves slightly over explicit euler, but sloooooow
@@ -730,7 +777,8 @@ def main():
     real_traj, cost, u_optimal = run_mpc(
         bluerov_symbolic, bluerov_dynamics, reference_eta, T*n, dt, N, 
         integrator, opts,
-        use_pwm=use_pwm, use_quaternion=use_quaternion, V_bat=16.0
+        use_pwm=use_pwm, use_quaternion=use_quaternion, 
+        use_tube_mpc=use_tube_mpc, V_bat=16.0
     )
 
     real_eta = real_traj[:6, :-1].T
