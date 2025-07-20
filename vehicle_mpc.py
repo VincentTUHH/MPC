@@ -1,7 +1,7 @@
 import casadi as ca
 import numpy as np
 import bluerov
-from animate import animate_bluerov, plot_box_test, plot_pose_error_boxplots, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
+from animate import animate_bluerov, plot_vehicle_xy_vs_reference, plot_box_test, plot_pose_error_boxplots, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
 import time
 from scipy.linalg import solve_continuous_are
 
@@ -730,7 +730,7 @@ def main():
     bluerov_dynamics = bluerov.BlueROVDynamics(bluerov_params_dynamic)
     bluerov_symbolic = BlueROVDynamicsSymbolic(bluerov_params_symbolic)
 
-    T = 20.0
+    T = 60.0
     fps = 20
     dt = 1 / fps
     n = 1
@@ -805,6 +805,7 @@ def main():
     plot_velocities(real_nu, dt)
     plot_control_inputs(u_optimal, dt)
     plot_pose_error_boxplots(reference_eta, real_eta)
+    plot_vehicle_xy_vs_reference(reference_eta, real_eta)
     animate_bluerov(real_eta, dt=dt)
 
 if __name__ == "__main__":

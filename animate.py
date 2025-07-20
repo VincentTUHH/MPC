@@ -200,6 +200,23 @@ def plot_vehicle_pos_vs_reference_time(ref_positions, real_positions, dt):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
 
+def plot_vehicle_xy_vs_reference(ref_positions, real_positions):
+    """
+    Plot the x-y trajectory of the vehicle, comparing real vs reference.
+    Both axes are scaled equally for accurate distance representation.
+    """
+    plt.figure(figsize=(8, 8))
+    plt.plot(ref_positions[:, 0], ref_positions[:, 1], '--', label='Reference')
+    plt.plot(real_positions[:, 0], real_positions[:, 1], label='Actual')
+    plt.xlabel('X [m]')
+    plt.ylabel('Y [m]')
+    plt.title('Vehicle XY Trajectory: Real vs Reference')
+    plt.legend()
+    plt.grid(True)
+    plt.axis('equal')  # Ensures equal scaling for x and y axes
+    plt.tight_layout()
+    plt.show()
+
 def plot_box_test():
     # fake up some data
     spread = np.random.rand(50) * 100
