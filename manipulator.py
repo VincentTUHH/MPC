@@ -6,6 +6,29 @@ import os
 from animate import animate_trajectory, plot_eef_positions, plot_tracking_errors, plot_prediction_error, plot_joint_angles
 import time
 import matplotlib.pyplot as plt
+from types import SimpleNamespace
+from copy import deepcopy
+
+def load_yaml(file_path):
+    with open(file_path, 'r') as f:
+        return yaml.safe_load(f)
+
+def recursive_merge(dict1, dict2):
+    """Recursively merge dict2 into dict1."""
+    result = deepcopy(dict1)
+    for key, value in dict2.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = recursive_merge(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+def dict_to_namespace(d):
+    """Convert dictionary to SimpleNamespace recursively for dot notation access."""
+    if not isinstance(d, dict):
+        return d
+    return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
+
 
 def load_dh_parameters(yaml_filename):
     dh_yaml_path = os.path.join(os.path.dirname(__file__), yaml_filename)
@@ -93,7 +116,12 @@ def generate_trajectory_with_limits(DH_table, joint_limits, joint_velocities, T=
 
 def compute_forward_kinematics(DH_table, q_traj):
     n_joints = DH_table.shape[0] - 1
+    # print(f"Computing forward kinematics for {n_joints} joints.")
     kin = Kinematics(DH_table)
+    # rotation_test = kin.get_rotation_iminus1_i(4)
+    # print("Rotation matrix from i-1 to i with i = 5=ee computed.")
+    # print(rotation_test)
+
     eef_positions = []
     eef_attitudes = []
     all_links = []
@@ -145,7 +173,8 @@ def run_mpc(DH_table, joint_limits, joint_efforts, joint_velocities):
     n_joints = DH_table.shape[0] - 1
     kin = Kinematics(DH_table)
     # q_traj = generate_trajectory(DH_table, T_trajectory, fps)
-    q_traj = generate_trajectory_with_limits(DH_table, joint_limits, joint_velocities, T_trajectory, fps)
+    # q_traj = generate_trajectory_with_limits(DH_table, joint_limits, joint_velocities, T_trajectory, fps)
+    q_traj, _, _, _ = excitation_trajectory(T=T_trajectory, fps=fps)
     ref_eef_positions, ref_eef_attitudes, all_links = compute_forward_kinematics(DH_table, q_traj)
 
     if ref_eef_positions.shape[0] < M + N:
@@ -447,7 +476,162 @@ def solve_cftoc_point_to_point(
     sol = opti.solve()
     return sol.value(q), sol.value(u), sol.value(cost)
 
+
+# dynamics of the manipulator given the recursive newton-euler equations
+# given the joint angles q, the joint velocities dq, and the joint accelerations ddq
+# returns the joint torque tau_base at the base of the manipulator
+def dynamics_recursive_newton_euler(model, q, dq, ddq, f_eef, l_eef, v_ref, a_ref, w_ref, dw_ref, g_ref):
+    # 1. compute kinematics
+    # 1.1. linear and angular velocities of each link i
+    # 1.2. linear and angular accelerations of each link i
+    # To compute the velocities and accelerations of each link using DH parameters,
+    # you need to propagate angular and linear velocities/accelerations along the chain.
+    # This is typically done using the recursive Newton-Euler algorithm.
+
+    # Initialize arrays for velocities and accelerations
+    n_links = model.get_number_of_links()
+    model.update(q) # -> updates especially R included in T
+
+    model.forward(v_ref, a_ref, w_ref, dw_ref, g_ref)
+
+    for i in range(1, n_links-1):
+        model.link_forward(i, q[i-1], dq[i-1], ddq[i-1])
+    model.link_forward(5, None, None, None)  # End-effector link
+
+    model.backward(f_eef, l_eef)
+
+    for i in range(n_links - 2, 0 - 1, -1):
+        print(i)
+        model.link_backward(i)
+
+    f_coupling, l_coupling = model.get_reference_wrench()
+
+    return np.concatenate((f_coupling, l_coupling))
+
+def excitation_trajectory(T=10.0, fps=50):
+    q_min = np.array([0.0, 5/9 * np.pi, 0.0, 0.0])
+    q_max = np.array([2*np.pi, np.pi, np.pi, 2*np.pi])
+    dq_min = np.array([-0.7, -0.7, -0.7, -0.7])
+    dq_max = -dq_min
+    ddq_min = np.array([-2, -2, -2, -2 ])
+    ddq_max = -ddq_min
+
+    dq_0 = np.array([0.0, 0.0, 0.0, 0.0])
+
+    T = T
+    fps = fps
+
+    timesteps = int(T * fps)
+    t = np.linspace(0, T, timesteps)
+
+    # Use sum of sinusoids with different frequencies and amplitudes within joint limits
+    n_joints = q_min.shape[0]
+    q_traj = np.zeros((n_joints, timesteps))
+    dq_traj = np.zeros((n_joints, timesteps))
+    ddq_traj = np.zeros((n_joints, timesteps))
+
+    for i in range(n_joints):
+        # Frequencies chosen to avoid harmonics and excite all modes
+        freqs = np.array([0.5, 1.0, 1.5, 2.0]) * (i+1)
+        amp = 0.4 * (q_max[i] - q_min[i]) / len(freqs)
+        offset = 0.5 * (q_max[i] + q_min[i])
+        q_traj[i, :] = offset
+        for f in freqs:
+            q_traj[i, :] += amp * np.sin(2 * np.pi * f * t / T + np.random.uniform(0, 2*np.pi))
+        # Clip to joint limits
+        q_traj[i, :] = np.clip(q_traj[i, :], q_min[i], q_max[i])
+        dq_traj[i, :] = np.gradient(q_traj[i, :], t)
+        dq_traj[i, :] = np.clip(dq_traj[i, :], dq_min[i], dq_max[i])
+        ddq_traj[i, :] = np.gradient(dq_traj[i, :], t)
+        ddq_traj[i, :] = np.clip(ddq_traj[i, :], ddq_min[i], ddq_max[i])
+
+    return q_traj, dq_traj, ddq_traj, t
+
+
 def main():
+    DH_table = load_dh_parameters('alpha_kin_params.yaml')
+
+    file_paths = ['alpha_kin_params.yaml', 'alpha_base_tf_params_bluerov.yaml', 'alpha_inertial_params_dh.yaml']
+    merged_dict = {}
+    for file in file_paths:
+        data = load_yaml(file)
+        params = data.get('/**', {}).get('ros__parameters', {})
+        merged_dict = recursive_merge(merged_dict, params)
+    alpha_params = dict_to_namespace(merged_dict)   # Convert to dot-access
+
+    kin = Kinematics(DH_table, alpha_params)
+
+    T = 10.0
+    q_traj, dq_traj, ddq_traj, t = excitation_trajectory(T = T)
+
+    tau = []
+
+    f_eef = np.array([0.0, 0.0, 0.0])
+    l_eef = np.array([0.0, 0.0, 0.0])
+    v_ref = np.array([0.0, 0.0, 0.0])
+    a_ref = np.array([0.0, 0.0, 0.0])
+    w_ref = np.array([0.0, 0.0, 0.0])
+    dw_ref = np.array([0.0, 0.0, 0.0])
+    g_ref = np.array([0.0, 0.0, -9.81])
+
+    for i in range(q_traj.shape[1]):
+        q = q_traj[:, i]
+        dq = dq_traj[:, i]
+        ddq = ddq_traj[:, i]
+
+        tau.append(
+            dynamics_recursive_newton_euler(
+                kin, q, dq, ddq, f_eef, l_eef, v_ref, a_ref, w_ref, dw_ref, g_ref
+            )
+        )
+
+    tau = np.array(tau)  # shape: (timesteps, 6)
+    fig, axs = plt.subplots(6, 1, figsize=(10, 8), sharex=True)
+
+    labels = ['Force X', 'Force Y', 'Force Z', 'Torque X', 'Torque Y', 'Torque Z']
+    for i in range(6):
+        axs[i].plot(t, tau[:, i])
+        axs[i].set_ylabel(labels[i])
+        axs[i].grid(True)
+
+    axs[-1].set_xlabel('Time [s] / Timesteps')
+    axs[-1].set_xticks(np.linspace(t[0], t[-1], 6))
+    axs[-1].set_xticklabels([f"{sec:.1f}s\n{int(idx)}" for sec, idx in zip(np.linspace(t[0], t[-1], 6), np.linspace(0, len(t)-1, 6))])
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+    # # Example usage
+    # print("First print")
+    # print(alpha_params.link_1)  # Should output: True
+    # print("Second print")
+    # print(alpha_params.link_0)     # Inertial matrix example from file2
+
+    # # link_keys = [k for k in alpha_params.keys() if k.startswith('link_')]
+    # # print(f"Number of link_i in alpha_params: {len(link_keys)}")
+    # print(f"Number of link_i in alpha_params (using __dict__): {len(alpha_params.__dict__)}")
+    
+
+    # TODO: den funktionsaufruf korrekt machen, um das modell zu testen
+    # wie sind und wo kommen die ref sachen her, wenn ich keine mobile basis habe?
+    
+
+    
+
+    
+
+
+    
+
+    
+    # ref_eef_positions, ref_eef_attitudes, all_links = compute_forward_kinematics(DH_table, q_traj)
+    # animate_trajectory(all_links)
+
+
+    return
+
     DH_table = load_dh_parameters('alpha_kin_params.yaml')
     joint_limits, joint_efforts, joint_velocities, all_joints = load_joint_limits('alpha_joint_lim_real.yaml')
     q_real, q_ref, predErr, cost, ref_eef_positions, ref_eef_attitudes, ref_all_links = run_mpc(DH_table, joint_limits, joint_efforts, joint_velocities)
@@ -456,7 +640,6 @@ def main():
     animate_trajectory(all_links)
     plot_joint_angles(q_real)
     plot_joint_angles(q_ref)
-    
 
     pos_error, att_error = compute_tracking_errors(ref_eef_positions, eef_positions, ref_eef_attitudes, eef_attitudes)
     plot_tracking_errors(pos_error, att_error)
