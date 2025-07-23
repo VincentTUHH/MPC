@@ -3,7 +3,7 @@ import casadi as ca
 from kinematics import Kinematics
 import yaml
 import os
-from animate import animate_trajectory, plot_eef_positions, plot_tracking_errors, plot_prediction_error, plot_joint_angles
+from animate import plot_wrench_vs_time_compare, plot_wrench_vs_time, plot_joint_trajectories, animate_trajectory, plot_eef_positions, plot_tracking_errors, plot_prediction_error, plot_joint_angles
 import time
 import matplotlib.pyplot as plt
 from types import SimpleNamespace
@@ -174,7 +174,7 @@ def run_mpc(DH_table, joint_limits, joint_efforts, joint_velocities):
     kin = Kinematics(DH_table)
     # q_traj = generate_trajectory(DH_table, T_trajectory, fps)
     # q_traj = generate_trajectory_with_limits(DH_table, joint_limits, joint_velocities, T_trajectory, fps)
-    q_traj, _, _, _ = excitation_trajectory(T=T_trajectory, fps=fps)
+    q_traj, _, _, _ = exciation_trajectory_with_fourier(T=T_trajectory, fps=fps)
     ref_eef_positions, ref_eef_attitudes, all_links = compute_forward_kinematics(DH_table, q_traj)
 
     if ref_eef_positions.shape[0] < M + N:
@@ -488,6 +488,11 @@ def dynamics_recursive_newton_euler(model, q, dq, ddq, f_eef, l_eef, v_ref, a_re
     # you need to propagate angular and linear velocities/accelerations along the chain.
     # This is typically done using the recursive Newton-Euler algorithm.
 
+    
+    # Print current values of q, dq, ddq
+    print("Current q[0] values: ", ' '.join(f"{val:.5f}" for val in q))
+    print("Current dq[0] values: ", ' '.join(f"{val:.5f}" for val in dq))
+    print("Current ddq[0] values:", ' '.join(f"{val:.6f}" for val in ddq))
     # Initialize arrays for velocities and accelerations
     n_links = model.get_number_of_links()
     model.update(q) # -> updates especially R included in T
@@ -498,11 +503,65 @@ def dynamics_recursive_newton_euler(model, q, dq, ddq, f_eef, l_eef, v_ref, a_re
         model.link_forward(i, q[i-1], dq[i-1], ddq[i-1])
     model.link_forward(5, None, None, None)  # End-effector link
 
+    # # Print current kinematics for each link
+    # kin_data = model.get_current_kinematics()
+    # n_links = len(kin_data['v'])
+    # for i in range(n_links):
+    #     print(f"Link ID: {i}")
+    #     for key in ['v', 'a', 'w', 'dw', 'g', 'v_c', 'a_c', 'dv_c', 'v_b']:
+    #         arr = kin_data.get(key, [None]*n_links)[i]
+    #         if arr is None:
+    #             arr_str = "None"
+    #         else:
+    #             arr_str = ' '.join(f"{x:.8g}" for x in arr)
+    #         print(f"{key}: {arr_str}")
+
+    # # Print rotation matrices from i-1 to i for each link
+    # print(f"Rotation matrix from ref to link 0:")
+    # print(model.get_R_reference())
+    # for i in range(1,6,1):
+    #     R_iminus1_i = model.get_rotation_iminus1_i(i)
+    #     print(f"Rotation matrix from link {i-1} to {i}:")
+    #     print(R_iminus1_i)
+
     model.backward(f_eef, l_eef)
 
     for i in range(n_links - 2, 0 - 1, -1):
-        print(i)
         model.link_backward(i)
+
+    # tau_data = model.get_current_wrench()
+    # n_links = len(tau_data['f'])
+    # for i in reversed(range(n_links)):
+    #     print(f"Link ID: {i}")
+    #     for key in ['f', 'l']:
+    #         arr = tau_data.get(key, [None]*n_links)[i]
+    #         if arr is None:
+    #             arr_str = "None"
+    #         else:
+    #             arr_str = ' '.join(f"{x:.8g}" for x in arr)
+    #         print(f"{key}: {arr_str}")
+
+    # # Print dynamic and hydrodynamic parameters for each link
+    # dyn_data = model.get_current_dynamic_parameters()
+    # n_links = len(dyn_data['I'])
+    # print("Dynamic and Hydrodynamic Parameters:")
+    # for i in range(n_links):
+    #     print(f"Link ID: {i}")
+    #     print("Inertia Matrix (I):\n", dyn_data['I'][i])
+    #     print("Added Mass Matrix (M_a):\n", dyn_data['M_a'][i])
+    #     print("Added Mass Matrix 12 (M12):\n", dyn_data['M12'][i])
+    #     print("Added Mass Matrix 21 (M21):\n", dyn_data['M21'][i])
+    #     print("Added Inertia Matrix (I_a):\n", dyn_data['I_a'][i])
+    #     print("Buoyancy Mass (m_buoy):", dyn_data['m_buoy'][i])
+    #     print("Center of Gravity Offset (r_c):", dyn_data['r_c'][i].T if dyn_data['r_c'][i] is not None else None)
+    #     print("Center of Buoyancy Offset (r_b):", dyn_data['r_b'][i].T if dyn_data['r_b'][i] is not None else None)
+    #     print("Mass (m):", dyn_data['m'][i])
+    #     print("Linear Damping Parameters:", dyn_data['lin_damp_param'][i].T if dyn_data['lin_damp_param'][i] is not None else None)
+    #     print("Nonlinear Damping Parameters:", dyn_data['nonlin_damp_param'][i].T if dyn_data['nonlin_damp_param'][i] is not None else None)
+    #     print("Translational Damping Matrix (D_t):\n", dyn_data['D_t'][i])
+    #     print("Rotational Damping Matrix (D_r):\n", dyn_data['D_r'][i])
+    #     print("COB to COG Offset (r_cb):", dyn_data['r_cb'][i].T if dyn_data['r_cb'][i] is not None else None)
+    #     print()
 
     f_coupling, l_coupling = model.get_reference_wrench()
 
@@ -548,6 +607,85 @@ def excitation_trajectory(T=10.0, fps=50):
     return q_traj, dq_traj, ddq_traj, t
 
 
+
+def fourier_traj(a, b, q0, t):
+    nF = 10
+    omega_f = 2 * np.pi * 0.1
+    q = np.zeros_like(t)
+    dq = np.zeros_like(t)
+    ddq = np.zeros_like(t)
+    for j in range(1, nF+1):
+        q += (a[j-1] / (omega_f*j)) * np.sin(omega_f*j*t) - (b[j-1] / (omega_f*j)) * np.cos(omega_f*j*t)
+        dq += a[j-1]*np.cos(omega_f*j*t) + b[j-1]*np.sin(omega_f*j*t)
+        ddq += -a[j-1]*omega_f*j*np.sin(omega_f*j*t) + b[j-1]*omega_f*j*np.cos(omega_f*j*t)
+    q += q0
+    return q, dq, ddq
+
+def exciation_trajectory_with_fourier(T=10.0, fps=50):
+    timesteps = int(T * fps)
+    t = np.linspace(0, T, timesteps)
+    # coeffs = {
+    #     0: {'a': [0.3, -0.1, 0.05, -0.02] + [0]*6,   'b': [-0.2, 0.15, -0.05, 0.02] + [0]*6, 'q0': 2.5},
+    #     1: {'a': [-0.25, 0.12, -0.06, 0.03] + [0]*6, 'b': [0.25, -0.08, 0.04, -0.02] + [0]*6, 'q0': 2.0},
+    #     2: {'a': [0.15, -0.05, 0.02, -0.01] + [0]*6, 'b': [0.1, -0.05, 0.01, -0.005] + [0]*6, 'q0': 1.0},
+    #     3: {'a': [0.6, -0.2, 0.1, -0.05] + [0]*6,    'b': [0.4, -0.1, 0.05, -0.02] + [0]*6,   'q0': 3.0}
+    # }
+    coeffs = {
+        0: {'a': [0.3, -0.1, 0.05, -0.02, 0.015, -0.01, 0.005, -0.003, 0.002, -0.001],
+            'b': [-0.2, 0.15, -0.05, 0.02, -0.015, 0.01, -0.005, 0.003, -0.002, 0.001],
+            'q0': 2.5},
+        1: {'a': [-0.25, 0.12, -0.06, 0.03, -0.02, 0.015, -0.007, 0.004, -0.002, 0.001],
+            'b': [0.25, -0.08, 0.04, -0.02, 0.015, -0.01, 0.005, -0.003, 0.002, -0.001],
+            'q0': 2.0},
+        2: {'a': [0.15, -0.05, 0.02, -0.01, 0.008, -0.005, 0.003, -0.002, 0.0015, -0.001],
+            'b': [0.1, -0.05, 0.01, -0.005, 0.004, -0.003, 0.002, -0.0015, 0.001, -0.0005],
+            'q0': 1.0},
+        3: {'a': [0.6, -0.2, 0.1, -0.05, 0.04, -0.03, 0.02, -0.01, 0.005, -0.002],
+            'b': [0.4, -0.1, 0.05, -0.02, 0.015, -0.01, 0.007, -0.004, 0.002, -0.001],
+            'q0': 3.0}
+    }
+    q_traj = np.zeros((4, len(t)))
+    dq_traj = np.zeros((4, len(t)))
+    ddq_traj = np.zeros((4, len(t)))
+
+    # Fill matrices
+    for i in range(4):
+        a = coeffs[i]['a']
+        b = coeffs[i]['b']
+        q0 = coeffs[i]['q0']
+        q_traj[i], dq_traj[i], ddq_traj[i] = fourier_traj(a, b, q0, t)
+
+    return q_traj, dq_traj, ddq_traj, t
+
+def export_trajectory_txt(filename, t, q_traj, dq_traj, ddq_traj):
+    with open(filename, 'w') as f:
+        for i in range(len(t)):
+            row = [f"{t[i]:.3f}"]
+            row += [f"{q_traj[j, i]:.6f}" for j in range(4)]
+            row += [f"{dq_traj[j, i]:.6f}" for j in range(4)]
+            row += [f"{ddq_traj[j, i]:.6f}" for j in range(4)]
+            f.write(', '.join(row) + '\n')
+
+def read_wrench_txt(filename):
+    """
+    Reads a .txt file with rows: time, f0x, f0y, f0z, l0x, l0y, l0z (comma separated).
+    Returns:
+        t: numpy array of times
+        tau: numpy array of shape (N, 6) with forces and torques
+    """
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            parts = [float(x.strip()) for x in line.split(',')]
+            data.append(parts)
+    data = np.array(data)
+    t = data[:, 0]
+    tau = data[:, 1:7]
+    return t, tau
+
+
+
+
 def main():
     DH_table = load_dh_parameters('alpha_kin_params.yaml')
 
@@ -562,7 +700,16 @@ def main():
     kin = Kinematics(DH_table, alpha_params)
 
     T = 10.0
-    q_traj, dq_traj, ddq_traj, t = excitation_trajectory(T = T)
+    q_traj, dq_traj, ddq_traj, t = exciation_trajectory_with_fourier(T = T)
+
+    # plot_joint_trajectories(t, q_traj, dq_traj, ddq_traj)
+    # plt.show()
+
+   
+
+    export_trajectory_txt('data/states/22_07_measurement_wet_1.txt', t, q_traj, dq_traj, ddq_traj)
+
+    t_cpp, tau_cpp = read_wrench_txt('data/model_output/22_07_measurement_wet_1.txt')
 
     tau = []
 
@@ -575,6 +722,7 @@ def main():
     g_ref = np.array([0.0, 0.0, -9.81])
 
     for i in range(q_traj.shape[1]):
+    # for i in range(0, 2, 1):
         q = q_traj[:, i]
         dq = dq_traj[:, i]
         ddq = ddq_traj[:, i]
@@ -586,45 +734,13 @@ def main():
         )
 
     tau = np.array(tau)  # shape: (timesteps, 6)
-    fig, axs = plt.subplots(6, 1, figsize=(10, 8), sharex=True)
+    
+    # plot_wrench_vs_time(t, tau, title='Wrench from Python Recursive Newton-Euler Dynamics')
+    # plot_wrench_vs_time(t_cpp, tau_cpp, title='Wrench from C++ Model Output')
 
-    labels = ['Force X', 'Force Y', 'Force Z', 'Torque X', 'Torque Y', 'Torque Z']
-    for i in range(6):
-        axs[i].plot(t, tau[:, i])
-        axs[i].set_ylabel(labels[i])
-        axs[i].grid(True)
+    plot_wrench_vs_time_compare(t, tau, tau_cpp, title="Wrench Comparison: Python vs C++")
 
-    axs[-1].set_xlabel('Time [s] / Timesteps')
-    axs[-1].set_xticks(np.linspace(t[0], t[-1], 6))
-    axs[-1].set_xticklabels([f"{sec:.1f}s\n{int(idx)}" for sec, idx in zip(np.linspace(t[0], t[-1], 6), np.linspace(0, len(t)-1, 6))])
-    plt.tight_layout()
     plt.show()
-
-
-
-
-    # # Example usage
-    # print("First print")
-    # print(alpha_params.link_1)  # Should output: True
-    # print("Second print")
-    # print(alpha_params.link_0)     # Inertial matrix example from file2
-
-    # # link_keys = [k for k in alpha_params.keys() if k.startswith('link_')]
-    # # print(f"Number of link_i in alpha_params: {len(link_keys)}")
-    # print(f"Number of link_i in alpha_params (using __dict__): {len(alpha_params.__dict__)}")
-    
-
-    # TODO: den funktionsaufruf korrekt machen, um das modell zu testen
-    # wie sind und wo kommen die ref sachen her, wenn ich keine mobile basis habe?
-    
-
-    
-
-    
-
-
-    
-
     
     # ref_eef_positions, ref_eef_attitudes, all_links = compute_forward_kinematics(DH_table, q_traj)
     # animate_trajectory(all_links)

@@ -156,12 +156,12 @@ class Kinematics:
                 else:
                     self.lin_damp_param.append(None)
 
-            self.get_nonlin_damp_param = []
+            self.nonlin_damp_param = []
             for i in range(self.n_links):
                 if self.inertial[i]:
-                    self.get_nonlin_damp_param.append(self.get_nonlin_damp_params(getattr(alpha_params, f'link_{i}').hyd.nonlin_damp))
+                    self.nonlin_damp_param.append(self.get_nonlin_damp_params(getattr(alpha_params, f'link_{i}').hyd.nonlin_damp))
                 else:
-                    self.get_nonlin_damp_param.append(None)
+                    self.nonlin_damp_param.append(None)
 
             self.D_t = [np.zeros((3, 3)) if self.inertial[_] else None for _ in range(self.n_links)]  # Translational damping matrix
             self.D_r = [np.zeros((3, 3)) if self.inertial[_] else None for _ in range(self.n_links)]  # Rotational damping matrix
@@ -180,6 +180,58 @@ class Kinematics:
             self.v_b = [None] * self.n_links
 
             # print(self.l)
+
+    def get_current_kinematics(self):
+        """
+        Returns the current values of v, a, w, dw, g for all links as lists.
+        Each entry is a numpy array or None.
+        """
+        return {
+            'v': self.v,
+            'a': self.a,
+            'w': self.w,
+            'dw': self.dw,
+            'g': self.g,
+            'a_c': self.a_c,
+            'v_c': self.v_c,
+            'dv_c': self.dv_c,
+            'v_b': self.v_b
+        }
+    
+    def get_current_dynamic_parameters(self):
+        """
+        Returns all dynamic and hydrodynamic parameters for all links as lists.
+        Each entry is a numpy array, matrix, or None.
+        """
+        return {
+            'I': self.I,
+            'M_a': self.M_a,
+            'M12': self.M12,
+            'M21': self.M21,
+            'I_a': self.I_a,
+            'm_buoy': self.m_buoy,
+            'r_c': self.r_c,
+            'r_b': self.r_b,
+            'm': self.m,
+            'lin_damp_param': self.lin_damp_param,
+            'nonlin_damp_param': self.nonlin_damp_param,
+            'D_t': self.D_t,
+            'D_r': self.D_r,
+            'r_cb': self.r_cb
+        }
+    
+    def get_current_wrench(self):
+        """
+        Returns the current force (f) and moment (l) values for all links as lists.
+        Each entry is a numpy array or None.
+        """
+        return {'f': self.f, 'l': self.l}
+    
+    def get_R_reference(self):
+        """
+        Returns the reference rotation matrix R_reference.
+        """
+        return self.R_reference
 
     @staticmethod
     def inertia_to_matrix(params):
@@ -407,7 +459,7 @@ class Kinematics:
         self.w[0] = R_transpose @ w_ref
         self.dw[0] = R_transpose @ dw_ref
         self.g[0] = R_transpose @ g_ref
-        self.v[0] = R_transpose @ v_ref + self.skew(w_ref) @ self.r_i_1_i[0]
+        self.v[0] = R_transpose @ v_ref + self.skew(self.w[0]) @ self.r_i_1_i[0]
         self.a[0] = R_transpose @ a_ref + self.skew(self.dw[0]) @ self.r_i_1_i[0] + self.skew(self.w[0]) @ (self.skew(self.w[0]) @ self.r_i_1_i[0])
 
         self.v_b[0] = self.v[0] + self.skew(self.w[0]) @ self.r_b[0]
@@ -442,7 +494,7 @@ class Kinematics:
             self.w[idx] = R_transpose @ self.w[idx-1] + dq * R_transpose[:,2]
             self.dw[idx] = R_transpose @ self.dw[idx-1] + ddq * R_transpose[:,2] + dq * self.skew(R_transpose @ self.w[idx-1]) @ R_transpose[:,2]
             self.g[idx] = R_transpose @ self.g[idx-1]
-            self.v[idx] = R_transpose @ self.v[idx-1] + self.skew(self.w[idx-1]) @ self.r_i_1_i[idx]
+            self.v[idx] = R_transpose @ self.v[idx-1] + self.skew(self.w[idx]) @ self.r_i_1_i[idx]
             self.a[idx] = R_transpose @ self.a[idx-1] + self.skew(self.dw[idx]) @ self.r_i_1_i[idx] + self.skew(self.w[idx]) @ (self.skew(self.w[idx]) @ self.r_i_1_i[idx])
 
         if self.inertial[idx]:
@@ -459,7 +511,7 @@ class Kinematics:
     def link_backward(self, idx):
 
         #check again for v_b, w ... if I want them as class variables or given from outside (I think rather class and only the reference kinematics from outside)
-        nonlin_damp_param = self.get_nonlin_damp_param[idx]
+        nonlin_damp_param = self.nonlin_damp_param[idx]
         lin_damp_param = self.lin_damp_param[idx]
 
         if self.D_t[idx] is not None and self.D_r[idx] is not None:
@@ -487,22 +539,23 @@ class Kinematics:
                 + self.skew(self.r_cb[idx]) @ (self.D_t[idx] @ self.v_b[idx])
                 + self.D_r[idx] @ self.w[idx]
             ) + self.skew(self.r_cb[idx]) @ (self.m_buoy[idx] * self.g[idx])
-        else:
-            f_a = np.zeros(3)
-            l_a = np.zeros(3)
+        # f_a = self.m_buoy[idx] * self.g[idx]
+        # l_a = self.skew(self.r_cb[idx]) @ (self.m_buoy[idx] * self.g[idx])
 
-        if idx == 0:
-            f_i_1 = self.R_reference @ self.f[idx+1]
-            l_i_1 = self.R_reference @ self.l[idx+1]
-        else:
-            f_i_1 = self.get_rotation_iminus1_i(idx) @ self.f[idx+1]
-            l_i_1 = self.get_rotation_iminus1_i(idx) @ self.l[idx+1]
+        f_i_1 = self.get_rotation_iminus1_i(idx+1) @ self.f[idx+1]
+        l_i_1 = self.get_rotation_iminus1_i(idx+1) @ self.l[idx+1]
+
+        print(self.m[idx] * self.g[idx])
+        print(self.m[idx] * self.a_c[idx])
+        print(f_i_1)
+        print(self.f[idx+1])
+        print(self.get_rotation_iminus1_i(idx+1))
 
         if self.inertial[idx]:
             # Compute force for link idx
             self.f[idx] = (
                 f_i_1
-                + self.m[idx] * self.a[idx]
+                + self.m[idx] * self.a_c[idx]
                 - self.m[idx] * self.g[idx]
                 + f_a
             )
@@ -520,6 +573,8 @@ class Kinematics:
             # If the link is not inertial, set forces and moments to zero
             self.f[idx] = f_i_1
             self.l[idx] = - self.skew(self.f[idx]) @ self.r_i_1_i[idx] + l_i_1
+
+        print(self.f[idx])
 
     def backward(self, f_eef, l_eef):
         """

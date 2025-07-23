@@ -378,3 +378,88 @@ def plot_jacobian_condition_number(jacobian_array, dt):
     plt.title('Jacobian Condition Number over Time')
     plt.grid(True)
     plt.show()
+
+def plot_joint_trajectories(t, q_traj, dq_traj, ddq_traj):
+    """
+    Plots joint positions, velocities, and accelerations over time.
+
+    Args:
+        t (np.ndarray): Time array.
+        q_traj (np.ndarray): Joint positions, shape (n_joints, timesteps).
+        dq_traj (np.ndarray): Joint velocities, shape (n_joints, timesteps).
+        ddq_traj (np.ndarray): Joint accelerations, shape (n_joints, timesteps).
+    """
+    n_joints = q_traj.shape[0]
+    fig, axs = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
+
+    # q(t)
+    for i in range(n_joints):
+        axs[0].plot(t, q_traj[i], label=fr'$q_{i+1}$')
+    axs[0].set_ylabel(r'$q_i(t)\, [\mathrm{rad}]$')
+    axs[0].legend()
+    axs[0].grid(True)
+
+    # dq(t)
+    for i in range(n_joints):
+        axs[1].plot(t, dq_traj[i], label=fr'$\dot{{q}}_{i+1}$')
+    axs[1].set_ylabel(r'$\dot{q}_i(t)\, [\mathrm{rad/s}]$')
+    axs[1].set_xlabel(r'$t\, [\mathrm{s}]$')
+    axs[1].legend()
+    axs[1].grid(True)
+
+    # ddq(t)
+    for i in range(n_joints):
+        axs[2].plot(t, ddq_traj[i], label=fr'$\ddot{{q}}_{i+1}$')
+    axs[2].set_ylabel(r'$\ddot{q}_i(t)\, [\mathrm{rad/s}^2]$')
+    axs[2].set_xlabel(r'$t\, [\mathrm{s}]$')
+    axs[2].legend()
+    axs[2].grid(True)
+
+    plt.tight_layout()
+
+def plot_wrench_vs_time(t, tau, title=None):
+    """
+    Plots the force and torque components over time.
+
+    Args:
+        t (np.ndarray): Time array.
+        tau (np.ndarray): Array of shape (timesteps, 6) with force and torque components.
+        title (str, optional): Title for the plot.
+    """
+    fig, axs = plt.subplots(6, 1, figsize=(10, 8), sharex=True)
+    labels = ['Force X', 'Force Y', 'Force Z', 'Torque X', 'Torque Y', 'Torque Z']
+    for i in range(6):
+        axs[i].plot(t, tau[:, i])
+        axs[i].set_ylabel(labels[i])
+        axs[i].grid(True)
+    axs[-1].set_xlabel('Time [s] / Timesteps')
+    axs[-1].set_xticks(np.linspace(t[0], t[-1], 6))
+    axs[-1].set_xticklabels([f"{sec:.1f}s\n{int(idx)}" for sec, idx in zip(np.linspace(t[0], t[-1], 6), np.linspace(0, len(t)-1, 6))])
+    if title is not None:
+        fig.suptitle(title)
+    plt.tight_layout()
+
+def plot_wrench_vs_time_compare(t, tau_python, tau_cpp, title=None):
+    """
+    Plots the force and torque components over time for both Python and C++ results.
+
+    Args:
+        t (np.ndarray): Time array.
+        tau_python (np.ndarray): Array of shape (timesteps, 6) with force and torque components (Python).
+        tau_cpp (np.ndarray): Array of shape (timesteps, 6) with force and torque components (C++).
+        title (str, optional): Title for the plot.
+    """
+    fig, axs = plt.subplots(6, 1, figsize=(10, 8), sharex=True)
+    labels = ['Force X', 'Force Y', 'Force Z', 'Torque X', 'Torque Y', 'Torque Z']
+    for i in range(6):
+        axs[i].plot(t, tau_python[:, i], label='Python')
+        axs[i].plot(t, tau_cpp[:, i], '--', label='C++')
+        axs[i].set_ylabel(labels[i])
+        axs[i].grid(True)
+        axs[i].legend()
+    axs[-1].set_xlabel('Time [s] / Timesteps')
+    axs[-1].set_xticks(np.linspace(t[0], t[-1], 6))
+    axs[-1].set_xticklabels([f"{sec:.1f}s\n{int(idx)}" for sec, idx in zip(np.linspace(t[0], t[-1], 6), np.linspace(0, len(t)-1, 6))])
+    if title is not None:
+        fig.suptitle(title)
+    plt.tight_layout()
