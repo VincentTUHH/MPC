@@ -22,173 +22,14 @@ def dh2matrix_sym(d, theta, a, alpha):
     )
 
 class Kinematics:
-    def __init__(self, DH_table, alpha_params=None):
+    def __init__(self, DH_table):
         self.DH_table = np.array(DH_table)
         self.n_joints = self.DH_table.shape[0] - 1
         self.q0 = self.DH_table[:, 1].copy()
         self.e3 = np.array([0, 0, 1])
-        self.TF_i = [np.zeros((4, 4)) for _ in range(self.n_joints + 1)]
-        self.TF_iminus1_i = [np.zeros((4, 4)) for _ in range(self.n_joints + 1)]
+        self.TF_i = [np.eye(4) for _ in range(self.n_joints + 1)]
+        self.TF_iminus1_i = [np.eye(4) for _ in range(self.n_joints + 1)]
         self.update(np.zeros(self.n_joints))
-
-        if alpha_params is not None:
-            self.n_links = len(alpha_params.__dict__)
-            self.r_i_1_i = np.zeros((self.n_links, 3))
-            self.R_reference = self.rpy_to_matrix(
-                alpha_params.link_0.r, alpha_params.link_0.p, alpha_params.link_0.y
-            )
-            tf_vec = np.array([
-                alpha_params.link_0.vec.x,
-                alpha_params.link_0.vec.y,
-                alpha_params.link_0.vec.z
-            ])
-            self.r_i_1_i[0] = self.R_reference.T @ tf_vec
-
-            for i in range(1, self.n_links):
-                self.r_i_1_i[i] = self.get_DH_link_offset(*self.DH_table[i-1])
-
-            self.inertial = [getattr(alpha_params, f'link_{i}').inertial for i in range(self.n_links)]
-            self.active = [getattr(alpha_params, f'link_{i}').active for i in range(self.n_links)]
-            self.dh_link = [getattr(alpha_params, f'link_{i}').dh_link for i in range(self.n_links)]
-
-            self.I = [self.inertia_to_matrix(getattr(alpha_params, f'link_{i}').I) if self.inertial[i] else None for i in range(self.n_links)]
-            self.M_a = [self.hyd_mass_to_transl_matrix(getattr(alpha_params, f'link_{i}').hyd.mass) if self.inertial[i] else None for i in range(self.n_links)]
-            self.M12 = [self.hyd_mass_to_M12(getattr(alpha_params, f'link_{i}').hyd.mass) if self.inertial[i] else None for i in range(self.n_links)]
-            self.M21 = [self.hyd_mass_to_M21(getattr(alpha_params, f'link_{i}').hyd.mass) if self.inertial[i] else None for i in range(self.n_links)]
-            self.I_a = [self.hyd_mass_to_inertia_matrix(getattr(alpha_params, f'link_{i}').hyd.mass) if self.inertial[i] else None for i in range(self.n_links)]
-            self.m_buoy = [getattr(alpha_params, f'link_{i}').hyd.buoy.hyd_mass if self.inertial[i] else None for i in range(self.n_links)]
-            self.r_b = [self.get_center_of_buoyancy(getattr(alpha_params, f'link_{i}').hyd.buoy.cob) if self.inertial[i] else None for i in range(self.n_links)]
-            self.r_c = [self.get_center_of_gravity(getattr(alpha_params, f'link_{i}').cog) if self.inertial[i] else None for i in range(self.n_links)]
-            self.r_cb = [self.r_b[i] - self.r_c[i] if self.inertial[i] else None for i in range(self.n_links)]
-            self.m = [getattr(alpha_params, f'link_{i}').mass if self.inertial[i] else None for i in range(self.n_links)]
-            self.lin_damp_param = [self.get_lin_damp_params(getattr(alpha_params, f'link_{i}').hyd.lin_damp) if self.inertial[i] else None for i in range(self.n_links)]
-            self.nonlin_damp_param = [self.get_nonlin_damp_params(getattr(alpha_params, f'link_{i}').hyd.nonlin_damp) if self.inertial[i] else None for i in range(self.n_links)]
-            self.D_t = [np.zeros((3, 3)) if self.inertial[_] else None for _ in range(self.n_links)]
-            self.D_r = [np.zeros((3, 3)) if self.inertial[_] else None for _ in range(self.n_links)]
-
-            self.f = [None] * self.n_links
-            self.l = [None] * self.n_links
-            self.v = [None] * self.n_links
-            self.a = [None] * self.n_links
-            self.dv_c = [None] * self.n_links
-            self.v_c = [None] * self.n_links
-            self.w = [None] * self.n_links
-            self.dw = [None] * self.n_links
-            self.a_c = [None] * self.n_links
-            self.g = [None] * self.n_links
-            self.v_b = [None] * self.n_links
-
-    def get_current_kinematics(self):
-        return {
-            'v': self.v, 'a': self.a, 'w': self.w, 'dw': self.dw,
-            'g': self.g, 'a_c': self.a_c, 'v_c': self.v_c,
-            'dv_c': self.dv_c, 'v_b': self.v_b
-        }
-
-    def get_current_dynamic_parameters(self):
-        return {
-            'I': self.I, 'M_a': self.M_a, 'M12': self.M12, 'M21': self.M21,
-            'I_a': self.I_a, 'm_buoy': self.m_buoy, 'r_c': self.r_c,
-            'r_b': self.r_b, 'm': self.m, 'lin_damp_param': self.lin_damp_param,
-            'nonlin_damp_param': self.nonlin_damp_param, 'D_t': self.D_t,
-            'D_r': self.D_r, 'r_cb': self.r_cb
-        }
-
-    def get_current_wrench(self):
-        return {'f': self.f, 'l': self.l}
-
-    def get_R_reference(self):
-        return self.R_reference
-
-    @staticmethod
-    def inertia_to_matrix(params):
-        return np.array([
-            [params.xx, params.xy, params.xz],
-            [params.xy, params.yy, params.yz],
-            [params.xz, params.yz, params.zz]
-        ])
-
-    @staticmethod
-    def hyd_mass_to_transl_matrix(params):
-        matrix = np.zeros((3, 3))
-        matrix[0, 0] = -params.X_dotu
-        matrix[1, 1] = -params.Y_dotv
-        matrix[2, 2] = -params.Z_dotw
-        return matrix
-
-    @staticmethod
-    def hyd_mass_to_M12(params):
-        matrix = np.zeros((3, 3))
-        matrix[0, 0] = -params.X_dotp
-        matrix[0, 1] = -params.X_dotq
-        matrix[0, 2] = -params.X_dotr
-        matrix[1, 0] = -params.Y_dotp
-        matrix[1, 1] = -params.Y_dotq
-        matrix[1, 2] = -params.Y_dotr
-        matrix[2, 0] = -params.Z_dotp
-        matrix[2, 1] = -params.Z_dotq
-        matrix[2, 2] = -params.Z_dotr
-        return matrix
-
-    @staticmethod
-    def hyd_mass_to_M21(params):
-        matrix = np.zeros((3, 3))
-        matrix[0, 0] = -params.K_dotu
-        matrix[0, 1] = -params.K_dotv
-        matrix[0, 2] = -params.K_dotw
-        matrix[1, 0] = -params.M_dotu
-        matrix[1, 1] = -params.M_dotv
-        matrix[1, 2] = -params.M_dotw
-        matrix[2, 0] = -params.N_dotu
-        matrix[2, 1] = -params.N_dotv
-        matrix[2, 2] = -params.N_dotw
-        return matrix
-
-    @staticmethod
-    def hyd_mass_to_inertia_matrix(params):
-        matrix = np.zeros((3, 3))
-        matrix[0, 0] = -params.K_dotp
-        matrix[0, 1] = -params.K_dotq
-        matrix[0, 2] = -params.K_dotr
-        matrix[1, 0] = -params.M_dotp
-        matrix[1, 1] = -params.M_dotq
-        matrix[1, 2] = -params.M_dotr
-        matrix[2, 0] = -params.N_dotp
-        matrix[2, 1] = -params.N_dotq
-        matrix[2, 2] = -params.N_dotr
-        return matrix
-
-    @staticmethod
-    def get_center_of_buoyancy(params):
-        return np.array([params.x, params.y, params.z])
-
-    @staticmethod
-    def get_center_of_gravity(params):
-        return np.array([params.x, params.y, params.z])
-
-    @staticmethod
-    def get_lin_damp_params(params):
-        return np.array([
-            params.X_u, params.Y_v, params.Z_w,
-            params.K_p, params.M_q, params.N_r
-        ])
-
-    @staticmethod
-    def get_nonlin_damp_params(params):
-        return np.array([
-            params.X_absuu, params.Y_absvv, params.Z_absww,
-            params.K_abspp, params.M_absqq, params.N_absrr
-        ])
-
-    @staticmethod
-    def get_DH_link_offset(d, theta, a, alpha):
-        R_alpha = np.array([
-            [1, 0, 0],
-            [0, np.cos(alpha), -np.sin(alpha)],
-            [0, np.sin(alpha),  np.cos(alpha)]
-        ])
-        offset = np.array([a, 0, d])
-        return R_alpha.T @ offset
 
     def updateDHTable(self, q):
         self.DH_table[:self.n_joints, 1] = self.q0[:self.n_joints] + q
@@ -199,168 +40,40 @@ class Kinematics:
             raise ValueError(f"Expected q of length {self.n_joints}, got {q.shape[0]}")
         self.updateDHTable(q)
         self.TF_i[0] = dh2matrix(*self.DH_table[0])
-        self.TF_iminus1_i[0] = self.TF_i[0]
         for i in range(1, self.n_joints + 1):
             self.TF_iminus1_i[i] = dh2matrix(*self.DH_table[i])
             self.TF_i[i] = self.TF_i[i-1] @ self.TF_iminus1_i[i]
 
-    def get_rotation_iminus1_i(self, idx):
-        if idx < 1 or idx > self.n_joints+1:
-            raise IndexError(f"Index {idx} out of bounds for n_joints {self.n_joints}")
-        return self.TF_iminus1_i[idx-1][:3, :3]
-
-    def get_translation_iminus1_i(self, idx):
-        if idx < 1 or idx > self.n_joints+1:
-            raise IndexError(f"Index {idx} out of bounds for n_joints {self.n_joints}")
-        return self.TF_iminus1_i[idx-1][:3, 3]
-
-    @staticmethod
-    def rpy_to_matrix(r, p, y):
-        cr, sr = np.cos(r), np.sin(r)
-        cp, sp = np.cos(p), np.sin(p)
-        cy, sy = np.cos(y), np.sin(y)
-        return np.array([
-            [cy * cp, cy * sp * sr - cr * sy, sy * sr + cy * cr * sp],
-            [cp * sy, cy * cr + sy * sp * sr, cr * sy * sp - cy * sr],
-            [-sp,     cp * sr,                cp * cr]
-        ])
-
-    @staticmethod
-    def skew(v):
-        return np.array([
-            [0,     -v[2],  v[1]],
-            [v[2],   0,    -v[0]],
-            [-v[1],  v[0],  0]
-        ])
-
-    def forward(self, v_ref, a_ref, w_ref, dw_ref, g_ref):
-        R_T = self.R_reference.T
-        self.w[0] = R_T @ w_ref
-        self.dw[0] = R_T @ dw_ref
-        self.g[0] = R_T @ g_ref
-        self.v[0] = R_T @ v_ref + self.skew(self.w[0]) @ self.r_i_1_i[0]
-        self.a[0] = R_T @ a_ref + self.skew(self.dw[0]) @ self.r_i_1_i[0] + self.skew(self.w[0]) @ (self.skew(self.w[0]) @ self.r_i_1_i[0])
-        self.v_b[0] = self.v[0] + self.skew(self.w[0]) @ self.r_b[0]
-        self.a_c[0] = self.a[0] + self.skew(self.dw[0]) @ self.r_c[0] + self.skew(self.w[0]) @ (self.skew(self.w[0]) @ self.r_c[0])
-        self.v_c[0] = self.v[0] + self.skew(self.w[0]) @ self.r_c[0]
-        self.dv_c[0] = self.a_c[0] - self.skew(self.w[0]) @ self.v_c[0]
-
-    def link_forward(self, idx, q, dq, ddq):
-        R_T = self.get_rotation_iminus1_i(idx).T
-        if not self.active[idx]:
-            self.w[idx] = R_T @ self.w[idx-1]
-            self.dw[idx] = R_T @ self.dw[idx-1]
-            self.g[idx] = R_T @ self.g[idx-1]
-            self.v[idx] = R_T @ self.v[idx-1] + self.skew(self.w[idx]) @ self.r_i_1_i[idx]
-            self.a[idx] = R_T @ self.a[idx-1] + self.skew(self.dw[idx]) @ self.r_i_1_i[idx] + self.skew(self.w[idx]) @ (self.skew(self.w[idx]) @ self.r_i_1_i[idx])
-        else:
-            self.w[idx] = R_T @ self.w[idx-1] + dq * R_T[:,2]
-            self.dw[idx] = R_T @ self.dw[idx-1] + ddq * R_T[:,2] + dq * self.skew(R_T @ self.w[idx-1]) @ R_T[:,2]
-            self.g[idx] = R_T @ self.g[idx-1]
-            self.v[idx] = R_T @ self.v[idx-1] + self.skew(self.w[idx]) @ self.r_i_1_i[idx]
-            self.a[idx] = R_T @ self.a[idx-1] + self.skew(self.dw[idx]) @ self.r_i_1_i[idx] + self.skew(self.w[idx]) @ (self.skew(self.w[idx]) @ self.r_i_1_i[idx])
-
-        if self.inertial[idx]:
-            self.v_b[idx] = self.v[idx] + self.skew(self.w[idx]) @ self.r_b[idx]
-            self.a_c[idx] = self.a[idx] + self.skew(self.dw[idx]) @ self.r_c[idx] + self.skew(self.w[idx]) @ (self.skew(self.w[idx]) @ self.r_c[idx])
-            self.v_c[idx] = self.v[idx] + self.skew(self.w[idx]) @ self.r_c[idx]
-            self.dv_c[idx] = self.a_c[idx] - self.skew(self.w[idx]) @ self.v_c[idx]
-        else:
-            self.v_b[idx] = self.a_c[idx] = self.v_c[idx] = self.dv_c[idx] = None
-
-    def link_backward(self, idx):
-        nonlin_damp_param = self.nonlin_damp_param[idx]
-        lin_damp_param = self.lin_damp_param[idx]
-
-        if self.D_t[idx] is not None and self.D_r[idx] is not None:
-            self.D_t[idx][0, 0] = -nonlin_damp_param[0] * np.abs(self.v_b[idx][0]) - lin_damp_param[0]
-            self.D_t[idx][1, 1] = -nonlin_damp_param[1] * np.abs(self.v_b[idx][1]) - lin_damp_param[1]
-            self.D_t[idx][2, 2] = -nonlin_damp_param[2] * np.abs(self.v_b[idx][2]) - lin_damp_param[2]
-            self.D_r[idx][0, 0] = -nonlin_damp_param[3] * np.abs(self.w[idx][0]) - lin_damp_param[3]
-            self.D_r[idx][1, 1] = -nonlin_damp_param[4] * np.abs(self.w[idx][1]) - lin_damp_param[4]
-            self.D_r[idx][2, 2] = -nonlin_damp_param[5] * np.abs(self.w[idx][2]) - lin_damp_param[5]
-
-        if self.inertial[idx]:
-            f_a = (
-                self.M_a[idx] @ self.dv_c[idx]
-                + self.M12[idx] @ self.dw[idx]
-                + self.skew(self.w[idx]) @ (self.M_a[idx] @ self.v_c[idx])
-                + self.skew(self.w[idx]) @ (self.M12[idx] @ self.w[idx])
-                + self.D_t[idx] @ self.v_b[idx]
-            ) + self.m_buoy[idx] * self.g[idx]
-
-            l_a = (
-                self.I_a[idx] @ self.dw[idx]
-                + self.M21[idx] @ self.dv_c[idx]
-                + self.skew(self.v_c[idx]) @ (self.M_a[idx] @ self.v_c[idx] + self.M12[idx] @ self.w[idx])
-                + self.skew(self.w[idx]) @ (self.M21[idx] @ self.v_c[idx] + self.I_a[idx] @ self.w[idx])
-                + self.skew(self.r_cb[idx]) @ (self.D_t[idx] @ self.v_b[idx])
-                + self.D_r[idx] @ self.w[idx]
-            ) + self.skew(self.r_cb[idx]) @ (self.m_buoy[idx] * self.g[idx])
-
-        f_i_1 = self.get_rotation_iminus1_i(idx+1) @ self.f[idx+1]
-        l_i_1 = self.get_rotation_iminus1_i(idx+1) @ self.l[idx+1]
-
-        if self.inertial[idx]:
-            self.f[idx] = f_i_1 + self.m[idx] * self.a_c[idx] - self.m[idx] * self.g[idx] + f_a
-            self.l[idx] = (
-                - self.skew(self.f[idx]) @ (self.r_i_1_i[idx] + self.r_c[idx])
-                + l_i_1
-                + self.skew(f_i_1) @ self.r_c[idx]
-                + self.I[idx] @ self.dw[idx]
-                + self.skew(self.w[idx]) @ (self.I[idx] @ self.w[idx])
-                + l_a
-            )
-        else:
-            self.f[idx] = f_i_1
-            self.l[idx] = - self.skew(self.f[idx]) @ self.r_i_1_i[idx] + l_i_1
-
-    def backward(self, f_eef, l_eef):
-        self.f[-1] = f_eef
-        self.l[-1] = - self.skew(f_eef) @ self.r_i_1_i[-1] + l_eef
-
-    def get_number_of_links(self):
-        return self.n_links
-
-    def get_reference_wrench(self):
-        R_T = self.R_reference.T
-        f_ref = - R_T @ self.f[0]
-        l_ref = - R_T @ self.l[0]
-        return f_ref, l_ref
-
     def get_eef_position(self):
-        return np.array(self.TF_i[-1][:3, 3])
+        return self.TF_i[-1][:3, 3]
 
     def get_eef_attitude(self):
         R = self.TF_i[-1][:3, :3]
-        m00, m01, m02 = R[0, 0], R[0, 1], R[0, 2]
-        m10, m11, m12 = R[1, 0], R[1, 1], R[1, 2]
-        m20, m21, m22 = R[2, 0], R[2, 1], R[2, 2]
-        tr = m00 + m11 + m22
-
+        m = R.flatten()
+        tr = m[0] + m[4] + m[8]
         if tr > 0:
             S = np.sqrt(tr + 1.0) * 2
             qw = 0.25 * S
-            qx = (m21 - m12) / S
-            qy = (m02 - m20) / S
-            qz = (m10 - m01) / S
-        elif (m00 > m11) and (m00 > m22):
-            S = np.sqrt(1.0 + m00 - m11 - m22) * 2
-            qw = (m21 - m12) / S
+            qx = (m[5] - m[7]) / S
+            qy = (m[2] - m[6]) / S
+            qz = (m[3] - m[1]) / S
+        elif m[0] > m[4] and m[0] > m[8]:
+            S = np.sqrt(1.0 + m[0] - m[4] - m[8]) * 2
+            qw = (m[5] - m[7]) / S
             qx = 0.25 * S
-            qy = (m01 + m10) / S
-            qz = (m02 + m20) / S
-        elif m11 > m22:
-            S = np.sqrt(1.0 + m11 - m00 - m22) * 2
-            qw = (m02 - m20) / S
-            qx = (m01 + m10) / S
+            qy = (m[1] + m[3]) / S
+            qz = (m[2] + m[6]) / S
+        elif m[4] > m[8]:
+            S = np.sqrt(1.0 + m[4] - m[0] - m[8]) * 2
+            qw = (m[2] - m[6]) / S
+            qx = (m[1] + m[3]) / S
             qy = 0.25 * S
-            qz = (m12 + m21) / S
+            qz = (m[5] + m[7]) / S
         else:
-            S = np.sqrt(1.0 + m22 - m00 - m11) * 2
-            qw = (m10 - m01) / S
-            qx = (m02 + m20) / S
-            qy = (m12 + m21) / S
+            S = np.sqrt(1.0 + m[8] - m[0] - m[4]) * 2
+            qw = (m[3] - m[1]) / S
+            qx = (m[2] + m[6]) / S
+            qy = (m[5] + m[7]) / S
             qz = 0.25 * S
         return np.array([qw, qx, qy, qz])
 
@@ -371,79 +84,44 @@ class Kinematics:
         J = np.zeros((3, self.n_joints))
         p_eef = self.get_eef_position()
         for i in range(self.n_joints):
-            if i == 0:
-                J[:, i] = np.cross(self.e3, p_eef)
-            else:
-                z = self.TF_i[i-1][:3, :3] @ self.e3
-                p = self.TF_i[i-1][:3, 3]
-                J[:, i] = np.cross(z, p_eef - p)
+            z = self.e3 if i == 0 else self.TF_i[i-1][:3, :3] @ self.e3
+            p = np.zeros(3) if i == 0 else self.TF_i[i-1][:3, 3]
+            J[:, i] = np.cross(z, p_eef - p)
         return J
 
     def get_rotation_jacobian(self):
         J = np.zeros((3, self.n_joints))
         for i in range(self.n_joints):
-            if i == 0:
-                J[:, i] = self.e3
-            else:
-                J[:, i] = self.TF_i[i-1][:3, :3] @ self.e3
+            J[:, i] = self.e3 if i == 0 else self.TF_i[i-1][:3, :3] @ self.e3
         return J
 
     def get_full_jacobian(self):
         return np.vstack((self.get_position_jacobian(), self.get_rotation_jacobian()))
 
     def forward_kinematics_symbolic(self, q_sym):
-        n_joints = self.DH_table.shape[0] - 1
         TF = ca.MX.eye(4)
-        for i in range(n_joints + 1):
-            d = ca.MX(self.DH_table[i, 0])
-            theta_0 = ca.MX(self.DH_table[i, 1])
-            a = ca.MX(self.DH_table[i, 2])
-            alpha = ca.MX(self.DH_table[i, 3])
-            theta = theta_0 + (q_sym[i] if i < n_joints else 0)
-            TF_i = dh2matrix_sym(d, theta, a, alpha)
-            TF = ca.mtimes(TF, TF_i)
+        for i in range(self.n_joints + 1):
+            d, theta_0, a, alpha = map(ca.MX, self.DH_table[i])
+            theta = theta_0 + (q_sym[i] if i < self.n_joints else 0)
+            TF = ca.mtimes(TF, dh2matrix_sym(d, theta, a, alpha))
         return TF
 
     @staticmethod
     def rotation_matrix_to_quaternion(R):
-        m00, m01, m02 = R[0,0], R[0,1], R[0,2]
-        m10, m11, m12 = R[1,0], R[1,1], R[1,2]
-        m20, m21, m22 = R[2,0], R[2,1], R[2,2]
-        tr = m00 + m11 + m22
-
-        def quat_case1():
+        m = [R[0,0], R[0,1], R[0,2], R[1,0], R[1,1], R[1,2], R[2,0], R[2,1], R[2,2]]
+        tr = m[0] + m[4] + m[8]
+        def case1():
             S = ca.sqrt(tr + 1.0) * 2
-            qw = 0.25 * S
-            qx = (m21 - m12) / S
-            qy = (m02 - m20) / S
-            qz = (m10 - m01) / S
-            return ca.vertcat(qw, qx, qy, qz)
-
-        def quat_case2():
-            S = ca.sqrt(1.0 + m00 - m11 - m22) * 2
-            qw = (m21 - m12) / S
-            qx = 0.25 * S
-            qy = (m01 + m10) / S
-            qz = (m02 + m20) / S
-            return ca.vertcat(qw, qx, qy, qz)
-
-        def quat_case3():
-            S = ca.sqrt(1.0 + m11 - m00 - m22) * 2
-            qw = (m02 - m20) / S
-            qx = (m01 + m10) / S
-            qy = 0.25 * S
-            qz = (m12 + m21) / S
-            return ca.vertcat(qw, qx, qy, qz)
-
-        def quat_case4():
-            S = ca.sqrt(1.0 + m22 - m00 - m11) * 2
-            qw = (m10 - m01) / S
-            qx = (m02 + m20) / S
-            qy = (m12 + m21) / S
-            qz = 0.25 * S
-            return ca.vertcat(qw, qx, qy, qz)
-
-        quat = ca.if_else(tr > 0, quat_case1(),
-                ca.if_else(ca.logic_and(m00 > m11, m00 > m22), quat_case2(),
-                ca.if_else(m11 > m22, quat_case3(), quat_case4())))
-        return quat
+            return ca.vertcat(0.25*S, (m[5]-m[7])/S, (m[2]-m[6])/S, (m[3]-m[1])/S)
+        def case2():
+            S = ca.sqrt(1.0 + m[0] - m[4] - m[8]) * 2
+            return ca.vertcat((m[5]-m[7])/S, 0.25*S, (m[1]+m[3])/S, (m[2]+m[6])/S)
+        def case3():
+            S = ca.sqrt(1.0 + m[4] - m[0] - m[8]) * 2
+            return ca.vertcat((m[2]-m[6])/S, (m[1]+m[3])/S, 0.25*S, (m[5]+m[7])/S)
+        def case4():
+            S = ca.sqrt(1.0 + m[8] - m[0] - m[4]) * 2
+            return ca.vertcat((m[3]-m[1])/S, (m[2]+m[6])/S, (m[5]+m[7])/S, 0.25*S)
+        return ca.if_else(tr > 0, case1(),
+               ca.if_else(ca.logic_and(m[0] > m[4], m[0] > m[8]), case2(),
+               ca.if_else(m[4] > m[8], case3(), case4())))
