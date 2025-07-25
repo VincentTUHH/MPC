@@ -9,6 +9,7 @@ from copy import deepcopy
 
 from kinematics import Kinematics
 from dynamics import Dynamics
+from dynamics_symbolic import DynamicsSymbolic
 from animate import (
     plot_wrench_vs_time_compare, plot_joint_trajectories, animate_trajectory,
     plot_eef_positions, plot_tracking_errors, plot_prediction_error, plot_joint_angles
@@ -192,11 +193,13 @@ def compute_tracking_errors(ref_eef_positions, eef_positions, ref_eef_attitudes,
 # -------------------- MPC --------------------
 
 def run_mpc(DH_table, joint_limits, joint_efforts, joint_velocities):
-    T_trajectory, fps, dt = 10, 50, 1 / 50
+    T_trajectory, fps = 10, 50, 
+    dt = 1/ fps
     M, N = T_trajectory * fps, 10
     n_joints = DH_table.shape[0] - 1
     kin = Kinematics(DH_table)
     q_traj, _, _, _ = excitation_trajectory_with_fourier(T=T_trajectory, fps=fps)
+    # q_traj = generate_trajectory_with_limits(DH_table, joint_limits, joint_velocities, T_trajectory, fps)
     ref_eef_positions, ref_eef_attitudes, all_links = compute_forward_kinematics(DH_table, q_traj)
     if ref_eef_positions.shape[0] < M + N:
         pad_count = M + N - ref_eef_positions.shape[0]
@@ -308,6 +311,31 @@ def read_wrench_txt(filename):
     tau = data[:, 1:7]
     return t, tau
 
+# -------------------- Symbolic Dynamics --------------------
+
+def rneM_symbolic_func(dyn_model):
+    n_joints = 4  # Example number of joints, adjust as needed
+    q = ca.MX.sym('q', n_joints)
+    dq = ca.MX.sym('dq', n_joints)
+    ddq = ca.MX.sym('ddq', n_joints)
+    v_ref = ca.MX.sym('v_ref', 3)
+    a_ref = ca.MX.sym('a_ref', 3)
+    w_ref = ca.MX.sym('w_ref', 3)
+    dw_ref = ca.MX.sym('dw_ref', 3)
+    quaternion_ref = ca.MX.sym('quat_ref', 4)
+    f_eef = ca.MX.sym('f_eef', 3)
+    l_eef = ca.MX.sym('l_eef', 3)
+
+    tau = dyn_model.rnem_symbolic(q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef)
+    
+    rneM_func = ca.Function(
+        'rneM_func',
+        [q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef],
+        [tau]
+    )
+    
+    return rneM_func
+
 # -------------------- Test & Main --------------------
 
 def dynamics_test():
@@ -335,6 +363,7 @@ def dynamics_test():
         q = q_traj[:, i]
         dq = dq_traj[:, i]
         ddq = ddq_traj[:, i]
+
         tau.append(
             dynamics_recursive_newton_euler(
                 dyn, q, dq, ddq, f_eef, l_eef, v_ref, a_ref, w_ref, dw_ref, g_ref
@@ -343,6 +372,48 @@ def dynamics_test():
     tau = np.array(tau)
     plot_wrench_vs_time_compare(t, tau, tau_cpp, title="Wrench Comparison: Python vs C++")
     plt.show()
+
+def dynamic_symbolic_test():
+    DH_table = load_dh_parameters('alpha_kin_params.yaml')
+    file_paths = [
+        'alpha_kin_params.yaml',
+        'alpha_base_tf_params_bluerov.yaml',
+        'alpha_inertial_params_dh.yaml'
+    ]
+    alpha_params = load_dynamics_parameters(file_paths)
+    dyn = DynamicsSymbolic(DH_table, alpha_params)
+    T = 10.0
+    q_traj, dq_traj, ddq_traj, t = excitation_trajectory_with_fourier(T=T)
+    export_trajectory_txt('data/states/22_07_measurement_wet_1.txt', t, q_traj, dq_traj, ddq_traj)
+    t_cpp, tau_cpp = read_wrench_txt('data/model_output/22_07_measurement_wet_1.txt')
+    
+    rneM_func = rneM_symbolic_func(dyn)
+
+    f_eef = np.zeros(3)
+    l_eef = np.zeros(3)
+    v_ref = np.zeros(3)
+    a_ref = np.zeros(3)
+    w_ref = np.zeros(3)
+    dw_ref = np.zeros(3)
+
+    tau = []
+
+    for i in range(q_traj.shape[1]):
+        q = q_traj[:, i]
+        dq = dq_traj[:, i]
+        ddq = ddq_traj[:, i]
+
+        quaternion_ref = np.array([1.0, 0.0, 0.0, 0.0]) # no rotation of body frame
+
+        out = rneM_func(q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef)
+        tau.append(np.array(out).flatten())  # ensures shape (6,)
+
+
+    tau = np.array(tau)
+
+    plot_wrench_vs_time_compare(t, tau, tau_cpp, title="Wrench Comparison: Python vs C++")
+    plt.show()
+
 
 def mpc_test():
     DH_table = load_dh_parameters('alpha_kin_params.yaml')
@@ -362,8 +433,9 @@ def mpc_test():
     plt.show()
 
 def main():
-    mpc_test()
+    # mpc_test()
     # dynamics_test()
+    dynamic_symbolic_test()
 
 if __name__ == "__main__":
     main()
