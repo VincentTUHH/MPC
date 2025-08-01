@@ -31,8 +31,6 @@ class Dynamics:
         self.TF_iminus1_i = [np.eye(4) for _ in range(self.n_joints + 1)]
         self.update(np.zeros(self.n_joints))
 
-        print(alpha_params)
-
         if alpha_params is not None:
             self.n_links = len(alpha_params.__dict__)
             self.r_i_1_i = np.zeros((self.n_links, 3))

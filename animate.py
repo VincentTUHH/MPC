@@ -463,3 +463,14 @@ def plot_wrench_vs_time_compare(t, tau_python, tau_cpp, title=None):
     if title is not None:
         fig.suptitle(title)
     plt.tight_layout()
+
+def plot_data_over_time(t, data, title=None):
+    plt.figure(figsize=(10, 4))
+    plt.plot(t, data)
+    plt.xlabel('Time [s]')
+    plt.ylabel('Value')
+    if title is not None:
+        plt.title(title)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
