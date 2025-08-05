@@ -374,3 +374,25 @@ class DynamicsSymbolic:
         D_r = -ca.diag(self.nonlin_damp_param[idx][3:6] * v_b_abs[3:6] + self.lin_damp_param[idx][3:6])
         self.D_t[idx] = D_t
         self.D_r[idx] = D_r
+
+    def rnem_function_symbolic(self):
+        q = ca.MX.sym('q', self.n_joints)
+        dq = ca.MX.sym('dq', self.n_joints)
+        ddq = ca.MX.sym('ddq', self.n_joints)
+        v_ref = ca.MX.sym('v_ref', 3)
+        a_ref = ca.MX.sym('a_ref', 3)
+        w_ref = ca.MX.sym('w_ref', 3)
+        dw_ref = ca.MX.sym('dw_ref', 3)
+        quaternion_ref = ca.MX.sym('quat_ref', 4)
+        f_eef = ca.MX.sym('f_eef', 3)
+        l_eef = ca.MX.sym('l_eef', 3)
+
+        tau = self.rnem_symbolic(q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef)
+        
+        rnem_func = ca.Function(
+            'rnem_func',
+            [q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef],
+            [tau]
+        )
+        
+        return rnem_func

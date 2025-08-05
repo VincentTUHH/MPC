@@ -433,31 +433,6 @@ def read_wrench_txt(filename):
     tau = data[:, 1:7]
     return t, tau
 
-# -------------------- Symbolic Dynamics --------------------
-
-def rneM_symbolic_func(dyn_model):
-    n_joints = 4  # Example number of joints, adjust as needed
-    q = ca.MX.sym('q', n_joints)
-    dq = ca.MX.sym('dq', n_joints)
-    ddq = ca.MX.sym('ddq', n_joints)
-    v_ref = ca.MX.sym('v_ref', 3)
-    a_ref = ca.MX.sym('a_ref', 3)
-    w_ref = ca.MX.sym('w_ref', 3)
-    dw_ref = ca.MX.sym('dw_ref', 3)
-    quaternion_ref = ca.MX.sym('quat_ref', 4)
-    f_eef = ca.MX.sym('f_eef', 3)
-    l_eef = ca.MX.sym('l_eef', 3)
-
-    tau = dyn_model.rnem_symbolic(q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef)
-    
-    rneM_func = ca.Function(
-        'rneM_func',
-        [q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef],
-        [tau]
-    )
-    
-    return rneM_func
-
 # -------------------- Test & Main --------------------
 
 def dynamics_test(type):
@@ -545,7 +520,7 @@ def dynamic_symbolic_test(type):
     # export_trajectory_txt('data/states/01_08_joint_excitation_trajectory.txt', t, q_traj, dq_traj, ddq_traj)
     t_cpp, tau_cpp = read_wrench_txt(f'data/model_output/01_08_cpp_wrench_on_vehicle_{type}.txt')
     
-    rneM_func = rneM_symbolic_func(dyn)
+    rneM_func = dyn.rnem_function_symbolic()
 
     f_eef = np.zeros(3)
     l_eef = np.zeros(3)
