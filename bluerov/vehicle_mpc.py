@@ -1,9 +1,12 @@
 import casadi as ca
 import numpy as np
-import bluerov
-from animate import animate_bluerov, plot_vehicle_xy_vs_reference, plot_box_test, plot_pose_error_boxplots, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
+import bluerov.bluerov as bluerov
+from common.animate import animate_bluerov, plot_vehicle_xy_vs_reference, plot_box_test, plot_pose_error_boxplots, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
 import time
 from scipy.linalg import solve_continuous_are
+from common.my_package_path import get_package_path
+import common.utils_sym as utils_sym
+import common.utils_math as utils_math
 
 # --- Utility Functions ---
 class BlueROVDynamicsSymbolic:
@@ -95,11 +98,11 @@ class BlueROVDynamicsSymbolic:
     def compute_mass_matrix(self):
         M_rb = ca.DM.zeros(6, 6)
         M_rb[0:3, 0:3] = self.mass * ca.DM.eye(3)
-        M_rb[0:3, 3:6] = -self.mass * skew_symmetric_symbolic(self.cog) # self.cog is the vector from body-fixed frame to the center of gravity expressed in the body-fixed frame
-        M_rb[3:6, 0:3] = self.mass * skew_symmetric_symbolic(self.cog)
+        M_rb[0:3, 3:6] = -self.mass * utils_sym.skew(self.cog) # self.cog is the vector from body-fixed frame to the center of gravity expressed in the body-fixed frame
+        M_rb[3:6, 0:3] = self.mass * utils_sym.skew(self.cog)
         # inertia tensor with respect to the center of gravity - Steiner's theorem to account for the offset of the center of gravity, 
         # when reference system for the generalized coordinates 
-        M_rb[3:6, 3:6] = ca.diag(self.inertia) - self.mass * skew_symmetric_symbolic(self.cog) @ skew_symmetric_symbolic(self.cog)
+        M_rb[3:6, 3:6] = ca.diag(self.inertia) - self.mass * utils_sym.skew(self.cog) @ utils_sym.skew(self.cog)
         M = M_rb + ca.diag(self.added_mass)
         return M
     
@@ -115,65 +118,40 @@ class BlueROVDynamicsSymbolic:
         v = nu[0:3]  # Linear velocities [u, v, w]
         w = nu[3:6]  # Angular velocities [p, q, r]
         # Compute the Coriolis forces based on the velocity and angular velocity
-        C[0:3, 3:6] = -skew_symmetric_symbolic(self.M[0:3, 0:3] @ v + self.M[0:3, 3:6] @ w)
-        C[3:6, 0:3] = -skew_symmetric_symbolic(self.M[0:3, 0:3] @ v + self.M[0:3, 3:6] @ w)
-        C[3:6, 3:6] = -skew_symmetric_symbolic(self.M[3:6, 0:3] @ v + self.M[3:6, 3:6] @ w)
+        C[0:3, 3:6] = -utils_sym.skew(self.M[0:3, 0:3] @ v + self.M[0:3, 3:6] @ w)
+        C[3:6, 0:3] = -utils_sym.skew(self.M[0:3, 0:3] @ v + self.M[0:3, 3:6] @ w)
+        C[3:6, 3:6] = -utils_sym.skew(self.M[3:6, 0:3] @ v + self.M[3:6, 3:6] @ w)
         return C
-
-    def rotation_matrix_from_euler(self, phi, theta, psi):
-        # ZYX convention
-        cphi = ca.cos(phi)
-        sphi = ca.sin(phi)
-        ctheta = ca.cos(theta)
-        stheta = ca.sin(theta)
-        cpsi = ca.cos(psi)
-        spsi = ca.sin(psi)
-        R = ca.vertcat(
-            ca.horzcat(cpsi * ctheta, cpsi * stheta * sphi - spsi * cphi, cpsi * stheta * cphi + spsi * sphi),
-            ca.horzcat(spsi * ctheta, spsi * stheta * sphi + cpsi * cphi, spsi * stheta * cphi - cpsi * sphi),
-            ca.horzcat(-stheta,        ctheta * sphi,                   ctheta * cphi)
-        )
-        return R
-
-    def rotation_matrix_from_quat(self, quat):
-        # quat: [w, x, y, z]
-        w, x, y, z = quat[0], quat[1], quat[2], quat[3]
-        R = ca.vertcat(
-            ca.horzcat(1 - 2*(y**2 + z**2),     2*(x*y - w*z),         2*(x*z + w*y)),
-            ca.horzcat(2*(x*y + w*z),           1 - 2*(x**2 + z**2),   2*(y*z - w*x)),
-            ca.horzcat(2*(x*z - w*y),           2*(y*z + w*x),         1 - 2*(x**2 + y**2))
-        )
-        return R
 
     def g(self, eta):  # gravitational and buoyancy forces + moments (CasADi compatible)
         # eta is the pose vector [x, y, z, phi, theta, psi]
         phi = eta[3]
         theta = eta[4]
         psi = eta[5]
-        R = self.rotation_matrix_from_euler(phi, theta, psi)
+        R = utils_sym.rotation_matrix_from_euler(phi, theta, psi)
         fg = self.mass * R.T @ ca.DM([0, 0, -self.gravity])
         fb = self.buoyancy * R.T @ ca.DM([0, 0, self.gravity])
         g_vec = ca.MX.zeros(6, 1)
         g_vec[0:3] = -(fg + fb)
         # Moments due to the forces acting at the center of gravity and center of buoyancy
-        g_vec[3:6] = -(skew_symmetric_symbolic(self.cog) @ fg + skew_symmetric_symbolic(self.cob) @ fb)
+        g_vec[3:6] = -(utils_sym.skew(self.cog) @ fg + utils_sym.skew(self.cob) @ fb)
         return g_vec
 
     def g_quat(self, eta):  # gravitational and buoyancy forces + moments (CasADi, quaternion version)
         # quat: [w, x, y, z]
         quat = eta[3:]
-        R = self.rotation_matrix_from_quat(quat)
+        R = utils_sym.rotation_matrix_from_quat(quat)
         fg = self.mass * R.T @ ca.DM([0, 0, -self.gravity])
         fb = self.buoyancy * R.T @ ca.DM([0, 0, self.gravity])
         g_vec = ca.MX.zeros(6, 1)
         g_vec[0:3] = -(fg + fb)
-        g_vec[3:6] = -(skew_symmetric_symbolic(self.cog) @ fg + skew_symmetric_symbolic(self.cob) @ fb)
+        g_vec[3:6] = -(utils_sym.skew(self.cog) @ fg + utils_sym.skew(self.cob) @ fb)
         return g_vec
 
     def J(self, eta):
         # Transformation from body to inertial (Euler)
         phi, theta, psi = eta[3], eta[4], eta[5]
-        R = self.rotation_matrix_from_euler(phi, theta, psi)
+        R = utils_sym.rotation_matrix_from_euler(phi, theta, psi)
         cphi = ca.cos(phi)
         sphi = ca.sin(phi)
         ctheta = ca.cos(theta)
@@ -193,7 +171,7 @@ class BlueROVDynamicsSymbolic:
         # Transformation from body to inertial (quaternion)
         # quat: [w, x, y, z]
         quat = eta[3:]
-        R = self.rotation_matrix_from_quat(quat)
+        R = utils_sym.rotation_matrix_from_quat(quat)
         w, x, y, z = quat[0], quat[1], quat[2], quat[3]
         # Angular velocity mapping for quaternion
         Omega = ca.vertcat(
@@ -207,33 +185,6 @@ class BlueROVDynamicsSymbolic:
             ca.horzcat(ca.DM.zeros(4,3), 0.5*Omega)
         )
         return J
-
-def euler_to_quat_np(roll, pitch, yaw):
-    cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
-    cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
-    cr, sr = np.cos(roll * 0.5), np.sin(roll * 0.5)
-    w = cr * cp * cy + sr * sp * sy
-    x = sr * cp * cy - cr * sp * sy
-    y = cr * sp * cy + sr * cp * sy
-    z = cr * cp * sy - sr * sp * cy
-    return np.array([w, x, y, z])
-
-def euler_to_quat_casadi(roll, pitch, yaw):
-    cy, sy = ca.cos(yaw * 0.5), ca.sin(yaw * 0.5)
-    cp, sp = ca.cos(pitch * 0.5), ca.sin(pitch * 0.5)
-    cr, sr = ca.cos(roll * 0.5), ca.sin(roll * 0.5)
-    w = cr * cp * cy + sr * sp * sy
-    x = sr * cp * cy - cr * sp * sy
-    y = cr * sp * cy + sr * cp * sy
-    z = cr * cp * sy - sr * sp * cy
-    return ca.vertcat(w, x, y, z)
-
-def skew_symmetric_symbolic(v):
-    return ca.vertcat(
-        ca.horzcat(0, -v[2], v[1]),
-        ca.horzcat(v[2], 0, -v[0]),
-        ca.horzcat(-v[1], v[0], 0)
-    )
 
 def compute_lqr_gain(A, B, Q=None, R=None):
     # Q, R can be tuned; default to identity
@@ -307,7 +258,7 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
         reference_trajectory_quat = np.zeros((7, reference_trajectory.shape[1]))
         reference_trajectory_quat[0:3, :] = reference_trajectory[0:3, :]
         for k in range(reference_trajectory.shape[1]):
-            quat = euler_to_quat_np(*reference_trajectory[3:6, k])
+            quat = utils_math.euler_to_quat(*reference_trajectory[3:6, k])
             reference_trajectory_quat[3:7, k] = quat
         reference_trajectory = reference_trajectory_quat
 
@@ -333,7 +284,7 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
         if use_quaternion:
             pos = q_real[:3, step]
             euler = q_real[3:n_dof, step]
-            quat = euler_to_quat_np(*euler)
+            quat = utils_math.euler_to_quat(*euler)
             eta = np.concatenate([pos, quat])
             nu = q_real[n_dof:, step]
             q0 = np.concatenate([nu, eta])
@@ -516,66 +467,6 @@ def integrate_dynamics(symbolic_bluerov, nu_k, eta_k, u_k, dt, V_bat, use_pwm, u
 
     else:
         raise ValueError(f"Unknown integrator type: {integrator}")
-    
-# def quaternion_error(q_goal, q_current):
-#     # Use CasADi's if_else for symbolic logic
-#     dot_prod = ca.dot(q_goal, q_current)
-#     q_goal_adj = ca.if_else(dot_prod < 0, -q_goal, q_goal)
-#     w_g = q_goal_adj[0]
-#     x_g = q_goal_adj[1]
-#     y_g = q_goal_adj[2]
-#     z_g = q_goal_adj[3]
-#     w_c = q_current[0]
-#     x_c = q_current[1]
-#     y_c = q_current[2]
-#     z_c = q_current[3]
-#     v_g = ca.vertcat(x_g, y_g, z_g)
-#     v_c = ca.vertcat(x_c, y_c, z_c)
-#     goal_att_tilde = ca.vertcat(
-#         ca.horzcat(0, -z_g, y_g),
-#         ca.horzcat(z_g, 0, -x_g),
-#         ca.horzcat(-y_g, x_g, 0)
-#     )
-#     att_error = ca.mtimes(w_g, v_c) - ca.mtimes(w_c, v_g) - ca.mtimes(goal_att_tilde, v_c)
-#     return att_error
-
-
-# def quat_mult(q1, q2):
-#     w1, x1, y1, z1 = q1[0], q1[1], q1[2], q1[3]
-#     w2, x2, y2, z2 = q2[0], q2[1], q2[2], q2[3]
-#     w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-#     x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-#     y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-#     z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-#     return ca.vertcat(w, x, y, z)
-
-# def quaternion_error(q_goal, q_current):
-#     # Ensure shortest path
-#     dot_prod = ca.dot(q_goal, q_current)
-#     q_goal_adj = ca.if_else(dot_prod < 0, -q_goal, q_goal)
-#     q_current_conj = ca.vertcat(q_current[0], -q_current[1], -q_current[2], -q_current[3])
-#     q_err = quat_mult(q_goal_adj, q_current_conj)
-#     return 2 * q_err[1:4]  # Vektoranteil als Fehler
-
-def quat_mult(q1, q2):
-    # Hamilton-Produkt zweier Quaternionen
-    w1, x1, y1, z1 = q1[0], q1[1], q1[2], q1[3]
-    w2, x2, y2, z2 = q2[0], q2[1], q2[2], q2[3]
-    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-    return ca.vertcat(w, x, y, z)
-
-def quaternion_error(q_goal, q_current):
-    # Kürzeste Verbindung auf der Quaternionen-Sphäre wählen
-    q_goal_adj = ca.if_else(ca.dot(q_goal, q_current) < 0, -q_goal, q_goal)
-    # Konjugierte von q_current
-    q_current_conj = ca.vertcat(q_current[0], -q_current[1], -q_current[2], -q_current[3])
-    # Fehlerquaternion
-    q_err = quat_mult(q_goal_adj, q_current_conj)
-    # Vektoranteil als Fehler (für kleine Winkel proportional zur Rotationsachse)
-    return 2 * q_err[1:4]
 
 def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0, n_thruster, V_bat, use_pwm, use_quaternion, integrator, opts, prev_g):
     opti = ca.Opti()
@@ -633,12 +524,12 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
     # opti.subject_to(q[n_dof:n_dof+3, N] - ref_terminal[0:3] >= -slack_terminal_pos)
     # opti.subject_to(slack_terminal_att >= 0)
     # if use_quaternion:
-    #     att_error_terminal = quaternion_error(ref_terminal[3:], q[n_dof+3:, N])
+    #     att_error_terminal = utils_sym.quaternion_error(ref_terminal[3:], q[n_dof+3:, N])
     # else:
-    #     ref_quat_terminal = euler_to_quat_casadi(*ref_terminal[3:6])
+    #     ref_quat_terminal = utils_sym.euler_to_quat(*ref_terminal[3:6])
     #     roll_t, pitch_t, yaw_t = ca.vertsplit(q[n_dof+3:, N])
-    #     curr_quat_terminal = euler_to_quat_casadi(roll_t, pitch_t, yaw_t)
-    #     att_error_terminal = quaternion_error(ref_quat_terminal, curr_quat_terminal)
+    #     curr_quat_terminal = utils_sym.euler_to_quat(roll_t, pitch_t, yaw_t)
+    #     att_error_terminal = utils_sym.quaternion_error(ref_quat_terminal, curr_quat_terminal)
     # opti.subject_to(att_error_terminal <= slack_terminal_att)
     # opti.subject_to(att_error_terminal >= -slack_terminal_att)
 
@@ -661,12 +552,12 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
 
         # Attitude error (always via quaternion error for consistency)
         if use_quaternion:
-            att_error = quaternion_error(reference_trajectory[3:, k], q[n_dof+3:, k])
+            att_error = utils_sym.quaternion_error(reference_trajectory[3:, k], q[n_dof+3:, k])
         else:
-            ref_quat = euler_to_quat_casadi(*reference_trajectory[3:, k])
+            ref_quat = utils_sym.euler_to_quat(*reference_trajectory[3:, k])
             roll, pitch, yaw = ca.vertsplit(q[n_dof+3:, k])
-            curr_quat = euler_to_quat_casadi(roll, pitch, yaw)
-            att_error = quaternion_error(ref_quat, curr_quat)
+            curr_quat = utils_sym.euler_to_quat(roll, pitch, yaw)
+            att_error = utils_sym.quaternion_error(ref_quat, curr_quat)
         cost += ca.dot(att_error, Q_att @ att_error)
 
         # Control effort
@@ -688,12 +579,12 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
         #     pos_error_terminal = q[n_dof:n_dof+3, k+1] - reference_trajectory[0:3, k]
         #     cost += ca.dot(pos_error_terminal, 10*Q_pos @ pos_error_terminal)
         #     if use_quaternion:
-        #         att_error_terminal = quaternion_error(reference_trajectory[3:, k], q[n_dof+3:, k+1])
+        #         att_error_terminal = utils_sym.quaternion_error(reference_trajectory[3:, k], q[n_dof+3:, k+1])
         #     else:
-        #         ref_quat_terminal = euler_to_quat_casadi(*reference_trajectory[3:, k])
+        #         ref_quat_terminal = utils_sym.euler_to_quat(*reference_trajectory[3:, k])
         #         roll_t, pitch_t, yaw_t = ca.vertsplit(q[n_dof+3:, k+1])
-        #         curr_quat_terminal = euler_to_quat_casadi(roll_t, pitch_t, yaw_t)
-        #         att_error_terminal = quaternion_error(ref_quat_terminal, curr_quat_terminal)
+        #         curr_quat_terminal = utils_sym.euler_to_quat(roll_t, pitch_t, yaw_t)
+        #         att_error_terminal = utils_sym.quaternion_error(ref_quat_terminal, curr_quat_terminal)
         #     cost += ca.dot(att_error_terminal, 10*Q_att @ att_error_terminal)
 
         
@@ -725,12 +616,15 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
 # --- Main Function ---
 
 def main():
-    bluerov_params_symbolic = bluerov.load_model_params('model_params.yaml')
-    bluerov_params_dynamic = bluerov.load_model_params('model_params_disturbed.yaml')
+    bluerov_package_path = get_package_path('bluerov')
+    model_params_path = bluerov_package_path + "/config/model_params.yaml"
+    model_params_disturbed_path = bluerov_package_path + "/config/model_params_disturbed.yaml"    
+    bluerov_params_symbolic = utils_math.load_model_params(model_params_path)
+    bluerov_params_dynamic = utils_math.load_model_params(model_params_disturbed_path)
     bluerov_dynamics = bluerov.BlueROVDynamics(bluerov_params_dynamic)
     bluerov_symbolic = BlueROVDynamicsSymbolic(bluerov_params_symbolic)
 
-    T = 60.0
+    T = 20.0
     fps = 20
     dt = 1 / fps
     n = 1

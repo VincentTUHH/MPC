@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 from scipy.optimize import curve_fit
+from common.my_package_path import get_package_path
 
 def read_thruster_csv(csv_path):
     df = pd.read_csv(csv_path, sep=';', decimal=',', engine='python')
@@ -16,8 +17,10 @@ def load_all_thruster_data():
     voltages = [10, 12, 14, 16, 18, 20]
     data = {}
     for v in voltages:
-        fname = f'multiplied_cleaned_T200_{v}V.csv'
-        d = read_thruster_csv(fname)
+        fname = f'/multiplied_cleaned_T200_{v}V.csv'
+        bluerov_package_path = get_package_path('bluerov')
+        data_path = bluerov_package_path + "/thruster_data" + fname
+        d = read_thruster_csv(data_path)
         data[v] = {
             'pwm': d['PWM (mus)'],
             'force': d['Force (N)']

@@ -1,85 +1,19 @@
 import numpy as np
 import casadi as ca
-import yaml
-import os
 import time
 import matplotlib.pyplot as plt
-from types import SimpleNamespace
-from copy import deepcopy
-
-from kinematics import Kinematics
-from dynamics import Dynamics
-from dynamics_symbolic import DynamicsSymbolic
+from manipulator.kinematics import Kinematics
+from manipulator.dynamics import Dynamics
+from manipulator.dynamics_symbolic import DynamicsSymbolic
 from scipy.spatial.transform import Rotation as R
-from animate import (
+from common.animate import (
     plot_wrench_vs_time_compare, plot_joint_trajectories, animate_trajectory,
     plot_eef_positions, plot_tracking_errors, plot_prediction_error, plot_joint_angles,
     plot_data_over_time
 )
-
-# -------------------- YAML & Config Utilities --------------------
-
-def load_yaml(file_path):
-    with open(file_path, 'r') as f:
-        return yaml.safe_load(f)
-
-def recursive_merge(dict1, dict2):
-    result = deepcopy(dict1)
-    for key, value in dict2.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = recursive_merge(result[key], value)
-        else:
-            result[key] = deepcopy(value)
-    return result
-
-def dict_to_namespace(d):
-    if not isinstance(d, dict):
-        return d
-    return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-
-def load_dh_parameters(yaml_filename):
-    dh_yaml_path = os.path.join(os.path.dirname(__file__), yaml_filename)
-    with open(dh_yaml_path, 'r') as f:
-        dh_data = yaml.safe_load(f)
-    links = []
-    if isinstance(dh_data, dict) and '/**' in dh_data and 'ros__parameters' in dh_data['/**']:
-        params = dh_data['/**']['ros__parameters']
-        for key in sorted(params.keys()):
-            link = params[key]
-            if isinstance(link, dict):
-                d = link.get('d', 0)
-                theta = link.get('theta0', 0)
-                a = link.get('a', 0)
-                alpha = link.get('alp', 0)
-                links.append([d, theta, a, alpha])
-        DH_table = np.array(links)
-    else:
-        if isinstance(dh_data, dict) and 'dh_table' in dh_data:
-            DH_table = np.array(dh_data['dh_table'])
-        else:
-            DH_table = np.array(dh_data)
-    return DH_table
-
-def load_joint_limits(yaml_filename):
-    yaml_path = os.path.join(os.path.dirname(__file__), yaml_filename)
-    with open(yaml_path, 'r') as f:
-        joint_data = yaml.safe_load(f)
-    joint_limits, joint_efforts, joint_velocities, all_joints = [], [], [], {}
-    for joint_name in sorted(joint_data.keys()):
-        entry = joint_data[joint_name]
-        joint_limits.append((entry.get('lower', None), entry.get('upper', None)))
-        joint_efforts.append(entry.get('effort', None))
-        joint_velocities.append(entry.get('velocity', None))
-        all_joints[joint_name] = entry
-    return joint_limits, joint_efforts, joint_velocities, all_joints
-
-def load_dynamics_parameters(file_paths):
-    merged_dict = {}
-    for file in file_paths:
-        data = load_yaml(file)
-        params = data.get('/**', {}).get('ros__parameters', {})
-        merged_dict = recursive_merge(merged_dict, params)
-    return dict_to_namespace(merged_dict)
+from common.my_package_path import get_package_path
+import common.utils_sym as utils_sym
+import common.utils_math as utils_math
 
 # -------------------- Trajectory Generation --------------------
 
@@ -291,23 +225,10 @@ def kinematic_model(u, dt, q0):
 
 # -------------------- Tracking Error --------------------
 
-def quaternion_error_np(q_goal, q_current):
-    w_g, x_g, y_g, z_g = q_goal
-    w_c, x_c, y_c, z_c = q_current
-    v_g = np.array([x_g, y_g, z_g])
-    v_c = np.array([x_c, y_c, z_c])
-    goal_att_tilde = np.array([
-        [0, -z_g, y_g],
-        [z_g, 0, -x_g],
-        [-y_g, x_g, 0]
-    ])
-    att_error = w_g * v_c - w_c * v_g - goal_att_tilde @ v_c
-    return np.linalg.norm(att_error)
-
 def compute_tracking_errors(ref_eef_positions, eef_positions, ref_eef_attitudes, eef_attitudes):
     pos_error = np.linalg.norm(ref_eef_positions[:eef_positions.shape[0], :] - eef_positions, axis=1)
     att_error = np.array([
-        quaternion_error_np(ref_eef_attitudes[i], eef_attitudes[i])
+        utils_math.quaternion_error_Niklas(ref_eef_attitudes[i], eef_attitudes[i])
         for i in range(min(len(ref_eef_attitudes), len(eef_attitudes)))
     ])
     return pos_error, att_error
@@ -398,7 +319,7 @@ def solve_cftoc(kin, N, dt, n_joints, q0, ref_eef_positions, ref_eef_attitudes, 
         eef_pose = kin.forward_kinematics_symbolic(q[:, i])
         pos_k = eef_pose[:3, 3]
         R_eef = eef_pose[:3, :3]
-        att_k = kin.rotation_matrix_to_quaternion(R_eef)
+        att_k = utils_sym.rotation_matrix_to_quaternion(R_eef)
         pos_error = ref_eef_positions[:, i] - pos_k
         att_error = quaternion_error(ref_eef_attitudes[:, i], att_k)
         cost += ca.sumsqr(pos_error) + ca.sumsqr(att_error)
@@ -422,32 +343,28 @@ def dynamics_recursive_newton_euler(model, q, dq, ddq, f_eef, l_eef, v_ref, a_re
     f_coupling, l_coupling = model.get_reference_wrench()
     return np.concatenate((f_coupling, l_coupling))
 
-def read_wrench_txt(filename):
-    data = []
-    with open(filename, 'r') as f:
-        for line in f:
-            parts = [float(x.strip()) for x in line.split(',')]
-            data.append(parts)
-    data = np.array(data)
-    t = data[:, 0]
-    tau = data[:, 1:7]
-    return t, tau
-
 # -------------------- Test & Main --------------------
 
 def dynamics_test(type):
-    DH_table = load_dh_parameters('alpha_kin_params.yaml')
+    manipulator_package_path = get_package_path('manipulator')
+    kin_params_path = manipulator_package_path + "/config/alpha_kin_params.yaml"
+    base_tf_bluerov_path = manipulator_package_path + "/config/alpha_base_tf_params_bluerov.yaml"
+    inertial_params_dh_path = manipulator_package_path + "/config/alpha_inertial_params_dh.yaml"
+
+
+
+    DH_table = utils_math.load_dh_params(kin_params_path)
     file_paths = [
-        'alpha_kin_params.yaml',
-        'alpha_base_tf_params_bluerov.yaml',
-        'alpha_inertial_params_dh.yaml'
+        kin_params_path,
+        base_tf_bluerov_path,
+        inertial_params_dh_path
     ]
-    alpha_params = load_dynamics_parameters(file_paths)
+    alpha_params = utils_math.load_dynamic_params(file_paths)
     dyn = Dynamics(DH_table, alpha_params)
     T = 10.0
     q_traj, dq_traj, ddq_traj, t = excitation_trajectory_with_fourier(T=T)
-    # export_trajectory_txt('data/states/01_08_joint_excitation_trajectory.txt', t, q_traj, dq_traj, ddq_traj)
-    t_cpp, tau_cpp = read_wrench_txt(f'data/model_output/01_08_cpp_wrench_on_vehicle_{type}.txt')
+    # export_trajectory_txt(f'{manipulator_package_path}/data/states/01_08_joint_excitation_trajectory.txt', t, q_traj, dq_traj, ddq_traj)
+    t_cpp, tau_cpp = utils_math.read_wrench_txt(f'{manipulator_package_path}/data/model_output/01_08_cpp_wrench_on_vehicle_{type}.txt')
 
     pos_traj, quat_traj, vel_traj, ang_vel_vec_traj, acc_traj, ang_acc_vec_traj, t = excitation_trajectory_vehicle_body(type)
     f_eef_traj, l_eef_traj, t = eef_wrench_contact(type)
@@ -507,19 +424,24 @@ def dynamics_test(type):
     return tau
 
 def dynamic_symbolic_test(type):
-    DH_table = load_dh_parameters('alpha_kin_params.yaml')
+    manipulator_package_path = get_package_path('manipulator')
+    kin_params_path = manipulator_package_path + "/config/alpha_kin_params.yaml"
+    base_tf_bluerov_path = manipulator_package_path + "/config/alpha_base_tf_params_bluerov.yaml"
+    inertial_params_dh_path = manipulator_package_path + "/config/alpha_inertial_params_dh.yaml"
+
+    DH_table = utils_math.load_dh_params(kin_params_path)
     file_paths = [
-        'alpha_kin_params.yaml',
-        'alpha_base_tf_params_bluerov.yaml',
-        'alpha_inertial_params_dh.yaml'
+        kin_params_path,
+        base_tf_bluerov_path,
+        inertial_params_dh_path
     ]
-    alpha_params = load_dynamics_parameters(file_paths)
+    alpha_params = utils_math.load_dynamic_params(file_paths)
     dyn = DynamicsSymbolic(DH_table, alpha_params)
     T = 10.0
     q_traj, dq_traj, ddq_traj, t = excitation_trajectory_with_fourier(T=T)
-    # export_trajectory_txt('data/states/01_08_joint_excitation_trajectory.txt', t, q_traj, dq_traj, ddq_traj)
-    t_cpp, tau_cpp = read_wrench_txt(f'data/model_output/01_08_cpp_wrench_on_vehicle_{type}.txt')
-    
+    # export_trajectory_txt(f'{manipulator_package_path}/data/states/01_08_joint_excitation_trajectory.txt', t, q_traj, dq_traj, ddq_traj)
+    t_cpp, tau_cpp = utils_math.read_wrench_txt(f'{manipulator_package_path}/data/model_output/01_08_cpp_wrench_on_vehicle_{type}.txt')
+
     rneM_func = dyn.rnem_function_symbolic()
 
     f_eef = np.zeros(3)
@@ -532,7 +454,7 @@ def dynamic_symbolic_test(type):
     pos_traj, quat_traj, vel_traj, ang_vel_vec_traj, acc_traj, ang_acc_vec_traj, t = excitation_trajectory_vehicle_body(type)
     f_eef_traj, l_eef_traj, t = eef_wrench_contact(type)
 
-    # export_references_txt(f'data/states/01_08_references_{type}.txt', t, quat_traj, vel_traj, acc_traj, ang_vel_vec_traj, ang_acc_vec_traj, f_eef_traj, l_eef_traj)
+    # export_references_txt(f'{manipulator_package_path}/data/states/01_08_references_{type}.txt', t, quat_traj, vel_traj, acc_traj, ang_vel_vec_traj, ang_acc_vec_traj, f_eef_traj, l_eef_traj)
     
     tau = []
 
@@ -590,8 +512,12 @@ def dynamic_symbolic_test(type):
 
 
 def mpc_test():
-    DH_table = load_dh_parameters('alpha_kin_params.yaml')
-    joint_limits, joint_efforts, joint_velocities, _ = load_joint_limits('alpha_joint_lim_real.yaml')
+    manipulatro_package_path = get_package_path('manipulator')
+    kin_params_path = manipulatro_package_path + "/config/alpha_kin_params.yaml"
+    joint_limits_path = manipulatro_package_path + "/config/alpha_joint_lim_real.yaml"
+
+    DH_table = utils_math.load_dh_params(kin_params_path)
+    joint_limits, joint_efforts, joint_velocities, _ = utils_math.load_joint_limits(joint_limits_path)
     q_real, q_ref, predErr, cost, ref_eef_positions, ref_eef_attitudes, ref_all_links = run_mpc(
         DH_table, joint_limits, joint_efforts, joint_velocities
     )
@@ -607,7 +533,7 @@ def mpc_test():
     plt.show()
 
 def main():
-    # mpc_test()
+    mpc_test()
 
     # Ask user for trajectory type
     print("Select trajectory type:")
@@ -632,9 +558,6 @@ def main():
     # Pass traj_type to test functions
     dynamics_test(traj_type)
     dynamic_symbolic_test(traj_type)
-
-    # dynamics_test()
-    # dynamic_symbolic_test()
 
 
 if __name__ == "__main__":

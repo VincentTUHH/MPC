@@ -1,25 +1,5 @@
 import numpy as np
-import casadi as ca
-
-def dh2matrix(d, theta, a, alpha):
-    ct, st = np.cos(theta), np.sin(theta)
-    ca_, sa = np.cos(alpha), np.sin(alpha)
-    return np.array([
-        [ct, -st*ca_,  st*sa, a*ct],
-        [st,  ct*ca_, -ct*sa, a*st],
-        [0,      sa,     ca_,    d],
-        [0,       0,      0,    1]
-    ])
-
-def dh2matrix_sym(d, theta, a, alpha):
-    ct, st = ca.cos(theta), ca.sin(theta)
-    ca_, sa = ca.cos(alpha), ca.sin(alpha)
-    return ca.vertcat(
-        ca.horzcat(ct, -st*ca_,  st*sa, a*ct),
-        ca.horzcat(st,  ct*ca_, -ct*sa, a*st),
-        ca.horzcat(0,      sa,     ca_,    d),
-        ca.horzcat(0,       0,      0,    1)
-    )
+import common.utils_math as utils_math
 
 class Dynamics:
     def __init__(self, DH_table, alpha_params=None):
@@ -34,7 +14,7 @@ class Dynamics:
         if alpha_params is not None:
             self.n_links = len(alpha_params.__dict__)
             self.r_i_1_i = np.zeros((self.n_links, 3))
-            self.R_reference = self.rpy_to_matrix(
+            self.R_reference = utils_math.rotation_matrix_from_euler(
                 alpha_params.link_0.r, alpha_params.link_0.p, alpha_params.link_0.y
             )
             tf_vec = np.array([
@@ -144,25 +124,6 @@ class Dynamics:
             [0, np.sin(alpha),  np.cos(alpha)]
         ])
         return R_alpha.T @ np.array([a, 0, d])
-
-    @staticmethod
-    def rpy_to_matrix(r, p, y):
-        cr, sr = np.cos(r), np.sin(r)
-        cp, sp = np.cos(p), np.sin(p)
-        cy, sy = np.cos(y), np.sin(y)
-        return np.array([
-            [cy * cp, cy * sp * sr - cr * sy, sy * sr + cy * cr * sp],
-            [cp * sy, cy * cr + sy * sp * sr, cr * sy * sp - cy * sr],
-            [-sp,     cp * sr,                cp * cr]
-        ])
-
-    @staticmethod
-    def skew(v):
-        return np.array([
-            [0,     -v[2],  v[1]],
-            [v[2],   0,    -v[0]],
-            [-v[1],  v[0],  0]
-        ])
     
     def get_current_kinematics(self):
         return {
@@ -201,10 +162,10 @@ class Dynamics:
         if q.shape[0] != self.n_joints:
             raise ValueError(f"Expected q of length {self.n_joints}, got {q.shape[0]}")
         self.updateDHTable(q)
-        self.TF_i[0] = dh2matrix(*self.DH_table[0])
+        self.TF_i[0] = utils_math.dh2matrix(*self.DH_table[0])
         self.TF_iminus1_i[0] = self.TF_i[0]
         for i in range(1, self.n_joints + 1):
-            self.TF_iminus1_i[i] = dh2matrix(*self.DH_table[i])
+            self.TF_iminus1_i[i] = utils_math.dh2matrix(*self.DH_table[i])
             self.TF_i[i] = self.TF_i[i-1] @ self.TF_iminus1_i[i]
 
     def get_rotation_iminus1_i(self, idx):
@@ -217,13 +178,13 @@ class Dynamics:
         w0 = R_T @ w_ref
         dw0 = R_T @ dw_ref
         g0 = R_T @ g_ref
-        v0 = R_T @ v_ref + self.skew(w0) @ self.r_i_1_i[0]
-        a0 = R_T @ a_ref + self.skew(dw0) @ self.r_i_1_i[0] + self.skew(w0) @ (self.skew(w0) @ self.r_i_1_i[0])
+        v0 = R_T @ v_ref + utils_math.skew(w0) @ self.r_i_1_i[0]
+        a0 = R_T @ a_ref + utils_math.skew(dw0) @ self.r_i_1_i[0] + utils_math.skew(w0) @ (utils_math.skew(w0) @ self.r_i_1_i[0])
         self.w[0], self.dw[0], self.g[0], self.v[0], self.a[0] = w0, dw0, g0, v0, a0
-        self.v_b[0] = v0 + self.skew(w0) @ self.r_b[0]
-        self.v_c[0] = v0 + self.skew(w0) @ self.r_c[0]
-        self.a_c[0] = a0 + self.skew(dw0) @ self.r_c[0] + self.skew(w0) @ (self.skew(w0) @ self.r_c[0])
-        self.dv_c[0] = self.a_c[0] - self.skew(w0) @ self.v_c[0]
+        self.v_b[0] = v0 + utils_math.skew(w0) @ self.r_b[0]
+        self.v_c[0] = v0 + utils_math.skew(w0) @ self.r_c[0]
+        self.a_c[0] = a0 + utils_math.skew(dw0) @ self.r_c[0] + utils_math.skew(w0) @ (utils_math.skew(w0) @ self.r_c[0])
+        self.dv_c[0] = self.a_c[0] - utils_math.skew(w0) @ self.v_c[0]
 
     def link_forward(self, idx, q, dq, ddq):
         R_T = self.get_rotation_iminus1_i(idx).T
@@ -235,21 +196,21 @@ class Dynamics:
             g = R_T @ prev_g
         else:
             w = R_T @ prev_w + dq * R_T[:,2]
-            dw = R_T @ prev_dw + ddq * R_T[:,2] + dq * self.skew(R_T @ prev_w) @ R_T[:,2]
+            dw = R_T @ prev_dw + ddq * R_T[:,2] + dq * utils_math.skew(R_T @ prev_w) @ R_T[:,2]
             g = R_T @ prev_g
-        v = R_T @ prev_v + self.skew(w) @ r_i
-        a = R_T @ prev_a + self.skew(dw) @ r_i + self.skew(w) @ (self.skew(w) @ r_i)
+        v = R_T @ prev_v + utils_math.skew(w) @ r_i
+        a = R_T @ prev_a + utils_math.skew(dw) @ r_i + utils_math.skew(w) @ (utils_math.skew(w) @ r_i)
         self.w[idx], self.dw[idx], self.g[idx], self.v[idx], self.a[idx] = w, dw, g, v, a
 
         if self.inertial[idx]:
-            self.v_b[idx] = v + self.skew(w) @ self.r_b[idx]
-            self.v_c[idx] = v + self.skew(w) @ self.r_c[idx]
-            self.a_c[idx] = a + self.skew(dw) @ self.r_c[idx] + self.skew(w) @ (self.skew(w) @ self.r_c[idx])
-            self.dv_c[idx] = self.a_c[idx] - self.skew(w) @ self.v_c[idx]
+            self.v_b[idx] = v + utils_math.skew(w) @ self.r_b[idx]
+            self.v_c[idx] = v + utils_math.skew(w) @ self.r_c[idx]
+            self.a_c[idx] = a + utils_math.skew(dw) @ self.r_c[idx] + utils_math.skew(w) @ (utils_math.skew(w) @ self.r_c[idx])
+            self.dv_c[idx] = self.a_c[idx] - utils_math.skew(w) @ self.v_c[idx]
 
     def backward(self, f_eef, l_eef):
         self.f[-1] = f_eef
-        self.l[-1] = -self.skew(f_eef) @ self.r_i_1_i[-1] + l_eef
+        self.l[-1] = -utils_math.skew(f_eef) @ self.r_i_1_i[-1] + l_eef
 
     def link_backward(self, idx):
         f_next = self.get_rotation_iminus1_i(idx+1) @ self.f[idx+1]
@@ -264,27 +225,27 @@ class Dynamics:
             f_a = (
                 self.M_a[idx] @ self.dv_c[idx]
                 + self.M12[idx] @ self.dw[idx]
-                + self.skew(self.w[idx]) @ (self.M_a[idx] @ self.v_c[idx] + self.M12[idx] @ self.w[idx])
+                + utils_math.skew(self.w[idx]) @ (self.M_a[idx] @ self.v_c[idx] + self.M12[idx] @ self.w[idx])
                 + D_t @ self.v_b[idx]
                 + self.m_buoy[idx] * self.g[idx]
             )
             l_a = (
                 self.I_a[idx] @ self.dw[idx]
                 + self.M21[idx] @ self.dv_c[idx]
-                + self.skew(self.v_c[idx]) @ (self.M_a[idx] @ self.v_c[idx] + self.M12[idx] @ self.w[idx])
-                + self.skew(self.w[idx]) @ (self.M21[idx] @ self.v_c[idx] + self.I_a[idx] @ self.w[idx])
-                + self.skew(self.r_cb[idx]) @ (D_t @ self.v_b[idx] + self.m_buoy[idx] * self.g[idx])
+                + utils_math.skew(self.v_c[idx]) @ (self.M_a[idx] @ self.v_c[idx] + self.M12[idx] @ self.w[idx])
+                + utils_math.skew(self.w[idx]) @ (self.M21[idx] @ self.v_c[idx] + self.I_a[idx] @ self.w[idx])
+                + utils_math.skew(self.r_cb[idx]) @ (D_t @ self.v_b[idx] + self.m_buoy[idx] * self.g[idx])
                 + D_r @ self.w[idx]
             )
             self.f[idx] = f_next + self.m[idx] * self.a_c[idx] - self.m[idx] * self.g[idx] + f_a
             self.l[idx] = (
-                -self.skew(self.f[idx]) @ (self.r_i_1_i[idx] + self.r_c[idx])
+                -utils_math.skew(self.f[idx]) @ (self.r_i_1_i[idx] + self.r_c[idx])
                 + l_next
-                + self.skew(f_next) @ self.r_c[idx]
+                + utils_math.skew(f_next) @ self.r_c[idx]
                 + self.I[idx] @ self.dw[idx]
-                + self.skew(self.w[idx]) @ (self.I[idx] @ self.w[idx])
+                + utils_math.skew(self.w[idx]) @ (self.I[idx] @ self.w[idx])
                 + l_a
             )
         else:
             self.f[idx] = f_next
-            self.l[idx] = -self.skew(self.f[idx]) @ self.r_i_1_i[idx] + l_next
+            self.l[idx] = -utils_math.skew(self.f[idx]) @ self.r_i_1_i[idx] + l_next

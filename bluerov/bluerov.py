@@ -1,7 +1,9 @@
 import numpy as np
 import yaml
-from animate import animate_bluerov
+from common.animate import animate_bluerov
 from scipy.spatial.transform import Rotation as Rot
+from common.my_package_path import get_package_path
+import common.utils_math as utils_math
 
 # Hinweis: Das dynamische Modell für den modellbasierten Controller ist in `uvms/bluerov_ctrl/src/twist_model_based_interface.cpp` definiert. 
 # Dieses Modell wird nur verwendet, wenn nicht der einfache PID-Controller eingesetzt wird. 
@@ -86,9 +88,9 @@ class BlueROVDynamics:
     def compute_mass_matrix(self):
         M_rb = np.zeros((6, 6))
         M_rb[0:3, 0:3] = self.mass * np.eye(3)
-        M_rb[0:3, 3:6] = -self.mass * skew_symmetric(self.cog)
-        M_rb[3:6, 0:3] = self.mass * skew_symmetric(self.cog)
-        M_rb[3:6, 3:6] = np.diag(self.inertia) - self.mass * skew_symmetric(self.cog) @ skew_symmetric(self.cog)
+        M_rb[0:3, 3:6] = -self.mass * utils_math.skew(self.cog)
+        M_rb[3:6, 0:3] = self.mass * utils_math.skew(self.cog)
+        M_rb[3:6, 3:6] = np.diag(self.inertia) - self.mass * utils_math.skew(self.cog) @ utils_math.skew(self.cog)
         M = M_rb + np.diag(self.added_mass)
         return M
 
@@ -103,34 +105,14 @@ class BlueROVDynamics:
         w = nu[3:6]
         mv = self.M[0:3, 0:3] @ v + self.M[0:3, 3:6] @ w
         mw = self.M[3:6, 0:3] @ v + self.M[3:6, 3:6] @ w
-        C[0:3, 3:6] = -skew_symmetric(mv)
-        C[3:6, 0:3] = -skew_symmetric(mv)
-        C[3:6, 3:6] = -skew_symmetric(mw)
+        C[0:3, 3:6] = -utils_math.skew(mv)
+        C[3:6, 0:3] = -utils_math.skew(mv)
+        C[3:6, 3:6] = -utils_math.skew(mw)
         return C
-
-    def rotation_matrix_from_euler(self, phi, theta, psi):
-        cphi = np.cos(phi)
-        sphi = np.sin(phi)
-        ctheta = np.cos(theta)
-        stheta = np.sin(theta)
-        cpsi = np.cos(psi)
-        spsi = np.sin(psi)
-        R = np.array([
-            [cpsi * ctheta, cpsi * stheta * sphi - spsi * cphi, cpsi * stheta * cphi + spsi * sphi],
-            [spsi * ctheta, spsi * stheta * sphi + cpsi * cphi, spsi * stheta * cphi - cpsi * sphi],
-            [-stheta,        ctheta * sphi,                     ctheta * cphi]
-        ])
-        return R
-    
-    def rotation_matrix_from_quat(self, q):
-        """
-        Convert quaternion [x, y, z, w] to rotation matrix (3x3).
-        """
-        return Rot.from_quat(q).as_matrix()
 
     def g(self, eta):
         phi, theta, psi = eta[3:]
-        R = self.rotation_matrix_from_euler(phi, theta, psi)
+        R = utils_math.rotation_matrix_from_euler(phi, theta, psi)
         fg = self.mass * R.T @ np.array([0, 0, -self.gravity])
         fb = self.buoyancy * R.T @ np.array([0, 0, self.gravity])
         g_vec = np.zeros(6)
@@ -145,7 +127,7 @@ class BlueROVDynamics:
         Returns: g_vec (6,)
         """
         q = eta[3:]
-        R = self.rotation_matrix_from_quat(q)
+        R = utils_math.rotation_matrix_from_quat(q)
         fg = self.mass * R.T @ np.array([0, 0, -self.gravity])
         fb = self.buoyancy * R.T @ np.array([0, 0, self.gravity])
         g_vec = np.zeros(6)
@@ -155,7 +137,7 @@ class BlueROVDynamics:
 
     def J(self, eta):
         phi, theta, psi = eta[3], eta[4], eta[5]
-        R = self.rotation_matrix_from_euler(phi, theta, psi)
+        R = utils_math.rotation_matrix_from_euler(phi, theta, psi)
         cphi = np.cos(phi)
         sphi = np.sin(phi)
         ctheta = np.cos(theta)
@@ -177,7 +159,7 @@ class BlueROVDynamics:
         Returns: J (6,6) mapping body velocities to pose derivatives.
         """
         q = eta[3:7]
-        R = self.rotation_matrix_from_quat(q)
+        R = utils_math.rotation_matrix_from_quat(q)
         # Quaternion kinematics matrix
         qx, qy, qz, qw = q
         G = 0.5 * np.array([
@@ -199,25 +181,6 @@ class BlueROVDynamics:
         pwm = np.clip(pwm, pwm_min, pwm_max)
         return pwm
 
-   
-
-def load_model_params(yaml_path):
-    """
-    Load model parameters from a ROS2 YAML config file.
-    Args:
-        yaml_path: str, path to the YAML file
-    Returns:
-        params: dict, containing model parameters
-    """
-    with open(yaml_path, 'r') as f:
-        data = yaml.safe_load(f)
-    # Find the first key (wildcard node name)
-    node_key = list(data.keys())[0]
-    model_params = data[node_key]['ros__parameters']['model']
-    return model_params
-
-
-
 def rigid_body_jacobian_euler(eta):
     """
     Returns the Jacobian matrix J(eta) that maps body-frame velocities to inertial-frame pose derivatives
@@ -238,21 +201,7 @@ def rigid_body_jacobian_euler(eta):
     cpsi = np.cos(psi)
     spsi = np.sin(psi)
 
-    # Use abbreviations in the rotation matrix
-
-    # Rotation from body to inertial frame
-    # R = np.array([
-    #     [ctheta * cpsi, sphi * stheta * cpsi - cphi * spsi, cphi * stheta * cpsi + sphi * spsi],
-    #     [ctheta * spsi, sphi * stheta * spsi + cphi * cpsi, cphi * stheta * spsi - sphi * cpsi],
-    #     [-stheta,       sphi * ctheta,                      cphi * ctheta]
-    # ])
-
-    # R = Rot.from_euler('xyz', [phi, theta, psi]).as_matrix()
-
-    R = Rot.from_euler('zyx', [psi, theta, phi]).as_matrix()
-
-
-    
+    R = utils_math.rotation_matrix_from_euler(phi, theta, psi)
 
     # Transformation from angular velocity in body to Euler angle rates
     T = np.array([
@@ -337,22 +286,6 @@ def normalize_angle(angle):
 def inverse_dynamics(dynamics, nu_dot, nu, eta):
     tau = dynamics.M @ nu_dot + dynamics.C(nu) @ nu + dynamics.D(nu) @ nu + dynamics.g(eta)
     return tau
-
-
-def skew_symmetric(v):
-    """
-    Computes the skew-symmetric matrix of a vector v.
-
-    Args:
-        v: np.array, vector (3,)
-
-    Returns:
-        S: np.array, skew-symmetric matrix (3,3)
-    """
-    return np.array([[0, -v[2], v[1]],
-                     [v[2], 0, -v[0]],
-                     [-v[1], v[0], 0]])
-
 
 def generate_circle_trajectory(radius=1.0, center=np.array([0.0, 0.0, -1.0]), num_points=500):
     """
@@ -589,13 +522,11 @@ def generate_slow_sine_curve_trajectory(start, end, T, dt, amplitude=0.2, wavele
     return traj
 
 def main():
-    # Create a BlueROVDynamics object and print the mixer matrix
-    bluerov_params = load_model_params('model_params.yaml')
+    bluerov_package_path = get_package_path('bluerov')
+    model_params_path = bluerov_package_path + "/config/model_params.yaml"
+    bluerov_params = utils_math.load_model_params(model_params_path)
     dynamics = BlueROVDynamics(bluerov_params)
     print("Mixer matrix:\n", dynamics.mixer)
-    return
-    bluerov_params = load_model_params('model_params.yaml')
-    dynamics = BlueROVDynamics(bluerov_params)
 
     eta_0 = np.array([0, 0, -1.0, 0.0, 0.0, 0])  # Initial pose [x, y, z, phi, theta, psi]
     nu_0 = np.array([0, 0, 0, 0, 0, 0])  # Initial velocity [u, v, w, p, q, r]

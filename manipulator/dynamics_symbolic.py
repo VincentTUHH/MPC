@@ -1,15 +1,6 @@
 import casadi as ca
 import numpy as np
-
-def dh2matrix_sym(d, theta, a, alpha):
-    ct, st = ca.cos(theta), ca.sin(theta)
-    ca_, sa = ca.cos(alpha), ca.sin(alpha)
-    return ca.vertcat(
-        ca.horzcat(ct, -st*ca_,  st*sa, a*ct),
-        ca.horzcat(st,  ct*ca_, -ct*sa, a*st),
-        ca.horzcat(0,      sa,     ca_,    d),
-        ca.horzcat(0,       0,      0,    1)
-    )
+import common.utils_sym as utils_sym
 
 # all variables used together with the optimization variable must be casadi variabeles
 # variables taht are constant should be DM as they are faster to evaluate
@@ -34,7 +25,7 @@ class DynamicsSymbolic:
             
             self.n_links = len(alpha_params.__dict__)
             self.r_i_1_i = [ca.DM.zeros(3, 1) for _ in range(self.n_links)]
-            self.R_reference = self.rpy_to_matrix(
+            self.R_reference = utils_sym.rotation_matrix_from_euler(
                 alpha_params.link_0.r, alpha_params.link_0.p, alpha_params.link_0.y
             ) # return DM, as all elements are python numerics
             tf_vec = ca.vertcat(
@@ -154,53 +145,21 @@ class DynamicsSymbolic:
         out = R_alpha.T @ np.array([a, 0, d])
         return ca.DM(out)
 
-    @staticmethod
-    def rpy_to_matrix(r, p, y):
-        cr, sr = np.cos(r), np.sin(r)
-        cp, sp = np.cos(p), np.sin(p)
-        cy, sy = np.cos(y), np.sin(y)
-        R = np.array([
-            [cy * cp, cy * sp * sr - cr * sy, sy * sr + cy * cr * sp],
-            [cp * sy, cy * cr + sy * sp * sr, cr * sy * sp - cy * sr],
-            [-sp,     cp * sr,                cp * cr]
-        ])
-        return ca.DM(R)
-
-    @staticmethod
-    def skew(v):
-        return ca.vertcat(
-            ca.horzcat(0,     -v[2],  v[1]),
-            ca.horzcat(v[2],   0,    -v[0]),
-            ca.horzcat(-v[1],  v[0],  0)
-        )
-
     def updateDHTable(self, q):
         for i in range(self.n_joints):
             self.DH_table[i, 1] = self.q0[i] + q[i]
 
     def update(self, q):
         self.updateDHTable(q)
-        self.TF_iminus1_i[0] = dh2matrix_sym(*[self.DH_table[0, j] for j in range(4)])
+        self.TF_iminus1_i[0] = utils_sym.dh2matrix(*[self.DH_table[0, j] for j in range(4)])
         for i in range(1, self.n_joints + 1):
-            self.TF_iminus1_i[i] = dh2matrix_sym(*[self.DH_table[i, j] for j in range(4)])
+            self.TF_iminus1_i[i] = utils_sym.dh2matrix(*[self.DH_table[i, j] for j in range(4)])
 
     def get_rotation_iminus1_i(self, idx):
         return self.TF_iminus1_i[idx-1][0:3, 0:3]
     
-    @staticmethod
-    def rotation_from_quaternion(quat):
-        # quat must be [w, x, y, z]
-        w, x, y, z = quat[0], quat[1], quat[2], quat[3]
-        # Rotation matrix from quaternion
-        R = ca.vertcat(
-            ca.horzcat(1 - 2*(y**2 + z**2),     2*(x*y - z*w),         2*(x*z + y*w)),
-            ca.horzcat(2*(x*y + z*w),           1 - 2*(x**2 + z**2),   2*(y*z - x*w)),
-            ca.horzcat(2*(x*z - y*w),           2*(y*z + x*w),         1 - 2*(x**2 + y**2))
-        )
-        return R
-    
     def rnem_symbolic(self, q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef):
-        g_ref = self.rotation_from_quaternion(quaternion_ref).T @ self.GRAVITY
+        g_ref = utils_sym.rotation_matrix_from_quat(quaternion_ref).T @ self.GRAVITY
         self.update(q)
         self.forward_link0(v_ref, a_ref, w_ref, dw_ref, g_ref) # base linnk 0
         self.forward(q, dq, ddq) # link 1 to 4 with their joints 
@@ -210,15 +169,14 @@ class DynamicsSymbolic:
         R_T = self.R_reference.T
         return ca.vertcat(-R_T @ self.f[0], -R_T @ self.l[0])
 
-
     def forward_link0(self, v_ref, a_ref, w_ref, dw_ref, g_ref):
         R_T = self.R_reference.T
         w0 = R_T @ w_ref
         dw0 = R_T @ dw_ref
         g0 = R_T @ g_ref
 
-        S_w0 = self.skew(w0)
-        S_dw0 = self.skew(dw0)
+        S_w0 = utils_sym.skew(w0)
+        S_dw0 = utils_sym.skew(dw0)
 
         r_i = self.r_i_1_i[0]
         r_b = self.r_b[0]
@@ -249,11 +207,11 @@ class DynamicsSymbolic:
             r_i = self.r_i_1_i[idx]
             z_R = R_T[:, 2]  # z-axis in the current frame
             w = R_T @ w_prev + dq[idx-1] * z_R
-            dw = R_T @ dw_prev + ddq[idx-1] * z_R + dq[idx-1] * self.skew(R_T @ w_prev) @ z_R
-            S_w = self.skew(w)
+            dw = R_T @ dw_prev + ddq[idx-1] * z_R + dq[idx-1] * utils_sym.skew(R_T @ w_prev) @ z_R
+            S_w = utils_sym.skew(w)
             S_w_r_i = S_w @ r_i
             v = R_T @ v_prev + S_w_r_i
-            a = R_T @ a_prev + self.skew(dw) @ r_i + S_w @ (S_w_r_i)
+            a = R_T @ a_prev + utils_sym.skew(dw) @ r_i + S_w @ (S_w_r_i)
             g = R_T @ g_prev
             self.w[idx] = w
             self.dw[idx] = dw
@@ -266,7 +224,7 @@ class DynamicsSymbolic:
             v_prev = v
             a_prev = a
 
-            S_dw = self.skew(dw)
+            S_dw = utils_sym.skew(dw)
 
             r_i = self.r_i_1_i[idx]
             r_b = self.r_b[idx]
@@ -287,10 +245,10 @@ class DynamicsSymbolic:
         r_i = self.r_i_1_i[-1]
         w = R_T @ w_prev
         dw = R_T @ dw_prev
-        S_w = self.skew(w)
+        S_w = utils_sym.skew(w)
         S_w_r_i = S_w @ r_i
         v = R_T @ v_prev + S_w_r_i
-        a = R_T @ a_prev + self.skew(dw) @ r_i + S_w @ (S_w_r_i)
+        a = R_T @ a_prev + utils_sym.skew(dw) @ r_i + S_w @ (S_w_r_i)
         g = R_T @ g_prev
         self.w[-1] = w
         self.dw[-1] = dw
@@ -300,7 +258,7 @@ class DynamicsSymbolic:
 
     def backward_eef(self, f_eef, l_eef):
         self.f[-1] = f_eef
-        self.l[-1] = -self.skew(f_eef) @ self.r_i_1_i[-1] + l_eef
+        self.l[-1] = -utils_sym.skew(f_eef) @ self.r_i_1_i[-1] + l_eef
 
     def backward(self):
         for idx in range(self.n_links-2, -1, -1):
@@ -333,7 +291,7 @@ class DynamicsSymbolic:
             M12w     = M12 @ w
             Mv_buoy  = D_t @ self.v_b[idx] + self.m_buoy[idx] * g
 
-            S_w      = self.skew(w)
+            S_w      = utils_sym.skew(w)
 
             # Compute forces
             f_a = (
@@ -347,18 +305,18 @@ class DynamicsSymbolic:
             l_a = (
                 I_a @ dw +
                 M21 @ dv_c +
-                self.skew(v_c) @ (Mv_c + M12w) +
+                utils_sym.skew(v_c) @ (Mv_c + M12w) +
                 S_w @ (M21 @ v_c + I_a @ w) +
-                self.skew(self.r_cb[idx]) @ Mv_buoy +
+                utils_sym.skew(self.r_cb[idx]) @ Mv_buoy +
                 D_r @ w
             )
 
             f = f_next + m * self.a_c[idx] - m * g + f_a
             self.f[idx] = f
             self.l[idx] = (
-                -self.skew(f) @ (self.r_i_1_i[idx] + r_c)
+                -utils_sym.skew(f) @ (self.r_i_1_i[idx] + r_c)
                 + l_next
-                + self.skew(f_next) @ r_c
+                + utils_sym.skew(f_next) @ r_c
                 + I @ dw
                 + S_w @ (I @ w)
                 + l_a

@@ -1,4 +1,4 @@
-import bluerov
+import bluerov.bluerov as bluerov
 import manipulator
 import numpy as np
 
