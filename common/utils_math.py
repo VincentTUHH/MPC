@@ -4,6 +4,9 @@ import yaml
 from copy import deepcopy
 from types import SimpleNamespace
 
+# Define commonly used constants
+GRAVITY_VECTOR = np.array([0, 0, -9.81])
+
 def rotation_matrix_from_quat(q):
     """
     Convert quaternion [w, x, y, z] to rotation matrix (3x3).

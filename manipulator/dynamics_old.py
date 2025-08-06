@@ -43,6 +43,8 @@ class Dynamics:
             self.m = [getattr(alpha_params, f'link_{i}').mass if self.inertial[i] else None for i in range(self.n_links)]
             self.lin_damp_param = [self.get_lin_damp_params(getattr(alpha_params, f'link_{i}').hyd.lin_damp) if self.inertial[i] else None for i in range(self.n_links)]
             self.nonlin_damp_param = [self.get_nonlin_damp_params(getattr(alpha_params, f'link_{i}').hyd.nonlin_damp) if self.inertial[i] else None for i in range(self.n_links)]
+            self.D_t = [np.zeros((3, 3)) if self.inertial[i] else None for i in range(self.n_links)]
+            self.D_r = [np.zeros((3, 3)) if self.inertial[i] else None for i in range(self.n_links)]
 
             self.f = [None] * self.n_links
             self.l = [None] * self.n_links
@@ -122,12 +124,43 @@ class Dynamics:
             [0, np.sin(alpha),  np.cos(alpha)]
         ])
         return R_alpha.T @ np.array([a, 0, d])
+    
+    def get_current_kinematics(self):
+        return {
+            'v': self.v, 'a': self.a, 'w': self.w, 'dw': self.dw,
+            'g': self.g, 'a_c': self.a_c, 'v_c': self.v_c,
+            'dv_c': self.dv_c, 'v_b': self.v_b
+        }
 
+    def get_current_dynamic_parameters(self):
+        return {
+            'I': self.I, 'M_a': self.M_a, 'M12': self.M12, 'M21': self.M21,
+            'I_a': self.I_a, 'm_buoy': self.m_buoy, 'r_c': self.r_c,
+            'r_b': self.r_b, 'm': self.m, 'lin_damp_param': self.lin_damp_param,
+            'nonlin_damp_param': self.nonlin_damp_param, 'D_t': self.D_t,
+            'D_r': self.D_r, 'r_cb': self.r_cb
+        }
+
+    def get_current_wrench(self):
+        return {'f': self.f, 'l': self.l}
+
+    def get_R_reference(self):
+        return self.R_reference
+    
+    def get_number_of_links(self):
+        return self.n_links
+
+    def get_reference_wrench(self):
+        R_T = self.R_reference.T
+        return -R_T @ self.f[0], -R_T @ self.l[0]
+    
     def updateDHTable(self, q):
         self.DH_table[:self.n_joints, 1] = self.q0[:self.n_joints] + q
 
     def update(self, q):
         q = np.asarray(q)
+        if q.shape[0] != self.n_joints:
+            raise ValueError(f"Expected q of length {self.n_joints}, got {q.shape[0]}")
         self.updateDHTable(q)
         self.TF_i[0] = utils_math.dh2matrix(*self.DH_table[0])
         self.TF_iminus1_i[0] = self.TF_i[0]
@@ -136,30 +169,22 @@ class Dynamics:
             self.TF_i[i] = self.TF_i[i-1] @ self.TF_iminus1_i[i]
 
     def get_rotation_iminus1_i(self, idx):
+        if idx < 1 or idx > self.n_joints+1:
+            raise IndexError(f"Index {idx} out of bounds for n_joints {self.n_joints}")
         return self.TF_iminus1_i[idx-1][:3, :3]
 
-    def forward_link0(self, v_ref, a_ref, w_ref, dw_ref, g_ref):
+    def forward(self, v_ref, a_ref, w_ref, dw_ref, g_ref):
         R_T = self.R_reference.T
         w0 = R_T @ w_ref
         dw0 = R_T @ dw_ref
         g0 = R_T @ g_ref
-        r_i = self.r_i_1_i[0]
-        r_b = self.r_b[0]
-        r_c = self.r_c[0]
-        S_w0 = utils_math.skew(w0)
-        S_dw0 = utils_math.skew(dw0)
-        v0 = R_T @ v_ref + S_w0 @ r_i
-        a0 = R_T @ a_ref + S_dw0 @ r_i + S_w0 @ (S_w0 @ r_i)
-        self.w[0], self.dw[0], self.g[0] = w0, dw0, g0
-        self.v[0], self.a[0] = v0, a0
-        self.v_b[0] = v0 + S_w0 @ r_b
-        self.v_c[0] = v0 + S_w0 @ r_c
-        self.a_c[0] = a0 + S_dw0 @ r_c + S_w0 @ (S_w0 @ r_c)
-        self.dv_c[0] = self.a_c[0] - S_w0 @ self.v_c[0]
-
-    def forward(self, q, dq, ddq):
-        for idx in range(1, self.n_joints + 1):
-            self.link_forward(idx, q[idx-1], dq[idx-1], ddq[idx-1])
+        v0 = R_T @ v_ref + utils_math.skew(w0) @ self.r_i_1_i[0]
+        a0 = R_T @ a_ref + utils_math.skew(dw0) @ self.r_i_1_i[0] + utils_math.skew(w0) @ (utils_math.skew(w0) @ self.r_i_1_i[0])
+        self.w[0], self.dw[0], self.g[0], self.v[0], self.a[0] = w0, dw0, g0, v0, a0
+        self.v_b[0] = v0 + utils_math.skew(w0) @ self.r_b[0]
+        self.v_c[0] = v0 + utils_math.skew(w0) @ self.r_c[0]
+        self.a_c[0] = a0 + utils_math.skew(dw0) @ self.r_c[0] + utils_math.skew(w0) @ (utils_math.skew(w0) @ self.r_c[0])
+        self.dv_c[0] = self.a_c[0] - utils_math.skew(w0) @ self.v_c[0]
 
     def link_forward(self, idx, q, dq, ddq):
         R_T = self.get_rotation_iminus1_i(idx).T
@@ -183,27 +208,9 @@ class Dynamics:
             self.a_c[idx] = a + utils_math.skew(dw) @ self.r_c[idx] + utils_math.skew(w) @ (utils_math.skew(w) @ self.r_c[idx])
             self.dv_c[idx] = self.a_c[idx] - utils_math.skew(w) @ self.v_c[idx]
 
-    def forward_eef(self):
-        idx = self.n_links - 1
-        prev = idx - 1
-        R_T = self.get_rotation_iminus1_i(prev+1).T
-        r_i = self.r_i_1_i[idx]
-        w = R_T @ self.w[prev]
-        dw = R_T @ self.dw[prev]
-        g = R_T @ self.g[prev]
-        v = R_T @ self.v[prev] + utils_math.skew(w) @ r_i
-        a = R_T @ self.a[prev] + utils_math.skew(dw) @ r_i + utils_math.skew(w) @ (utils_math.skew(w) @ r_i)
-        self.w[idx], self.dw[idx], self.g[idx] = w, dw, g
-        self.v[idx], self.a[idx] = v, a
-
-    def backward_eef(self, f_eef, l_eef):
-        idx = self.n_links - 1
-        self.f[idx] = f_eef
-        self.l[idx] = -utils_math.skew(f_eef) @ self.r_i_1_i[idx] + l_eef
-
-    def backward(self):
-        for idx in range(self.n_links - 2, -1, -1):
-            self.link_backward(idx)
+    def backward(self, f_eef, l_eef):
+        self.f[-1] = f_eef
+        self.l[-1] = -utils_math.skew(f_eef) @ self.r_i_1_i[-1] + l_eef
 
     def link_backward(self, idx):
         f_next = self.get_rotation_iminus1_i(idx+1) @ self.f[idx+1]
@@ -213,6 +220,7 @@ class Dynamics:
             w_abs = np.abs(self.w[idx])
             D_t = -np.diag(self.nonlin_damp_param[idx][:3] * v_b_abs + self.lin_damp_param[idx][:3])
             D_r = -np.diag(self.nonlin_damp_param[idx][3:] * w_abs + self.lin_damp_param[idx][3:])
+            self.D_t[idx], self.D_r[idx] = D_t, D_r
 
             f_a = (
                 self.M_a[idx] @ self.dv_c[idx]
@@ -241,19 +249,3 @@ class Dynamics:
         else:
             self.f[idx] = f_next
             self.l[idx] = -utils_math.skew(self.f[idx]) @ self.r_i_1_i[idx] + l_next
-    
-    def rnem(self, q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef):
-        R_quat = utils_math.rotation_matrix_from_quat(quaternion_ref)
-        g_ref = R_quat.T @ utils_math.GRAVITY_VECTOR
-        self.update(q)
-        self.forward_link0(v_ref, a_ref, w_ref, dw_ref, g_ref)
-        self.forward(q, dq, ddq)
-        self.forward_eef()
-        self.backward_eef(f_eef, l_eef)
-        self.backward()
-        return self.get_reference_wrench()
-    
-
-    def get_reference_wrench(self):
-        R_T = self.R_reference.T
-        return np.concatenate((-R_T @ self.f[0], -R_T @ self.l[0]))

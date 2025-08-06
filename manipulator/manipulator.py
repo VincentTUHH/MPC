@@ -345,7 +345,7 @@ def dynamics_recursive_newton_euler(model, q, dq, ddq, f_eef, l_eef, v_ref, a_re
 
 # -------------------- Test & Main --------------------
 
-def dynamics_test(type):
+def dynamic_test(type):
     manipulator_package_path = get_package_path('manipulator')
     kin_params_path = manipulator_package_path + "/config/alpha_kin_params.yaml"
     base_tf_bluerov_path = manipulator_package_path + "/config/alpha_base_tf_params_bluerov.yaml"
@@ -369,50 +369,48 @@ def dynamics_test(type):
     pos_traj, quat_traj, vel_traj, ang_vel_vec_traj, acc_traj, ang_acc_vec_traj, t = excitation_trajectory_vehicle_body(type)
     f_eef_traj, l_eef_traj, t = eef_wrench_contact(type)
 
-
-    tau = []
     f_eef = np.zeros(3)
     l_eef = np.zeros(3)
     v_ref = np.zeros(3)
     a_ref = np.zeros(3)
     w_ref = np.zeros(3)
     dw_ref = np.zeros(3)
-    g_ref = np.array([0.0, 0.0, -9.81])
-    # g_ref = np.array([0.195425, -0.0995513, -9.80755])
+
+    # export_references_txt(f'{manipulator_package_path}/data/states/01_08_references_{type}.txt', t, quat_traj, vel_traj, acc_traj, ang_vel_vec_traj, ang_acc_vec_traj, f_eef_traj, l_eef_traj)
+    
+    tau = []
+
     for i in range(q_traj.shape[1]):
         q = q_traj[:, i]
         dq = dq_traj[:, i]
         ddq = ddq_traj[:, i]
 
+        # quaternion_ref = np.array([1.0, 0.0, 0.0, 0.0]) # no rotation of body frame
+        # # quaternion_ref = np.array([0.9998, 0.0050, 0.0100, 0.0075])
+
         quaternion_ref = quat_traj[:, i]  # use quaternion trajectory
         # print(f"Quaternion ref: {quaternion_ref}")
-        # Rotate gravity vector g_ref by quaternion_ref
-        # Convert quaternion_ref (w, x, y, z) to (x, y, z, w) for scipy
-        # quat_xyzw = np.array([quaternion_ref[1], quaternion_ref[2], quaternion_ref[3], quaternion_ref[0]])
-        r = R.from_quat(quaternion_ref, scalar_first=True)  # Use scalar_first=True for (w, x, y, z) format
-        r_num = r.as_matrix()
-        # print(f"Rotation matrix: {r_num}")
-        g_ref_iter = r_num.T @ g_ref  # Apply rotation to gravity vector
-        # print(f"Gravity vector after rotation: {g_ref_iter}")
-        # g_ref_iter = r.apply(g_ref.T).T
 
         v_ref = vel_traj[:, i]
         a_ref = acc_traj[:, i]
         w_ref = ang_vel_vec_traj[:, i]
         dw_ref = ang_acc_vec_traj[:, i]
 
+        # print(f"v_ref: {v_ref}, a_ref: {a_ref}, w_ref: {w_ref}, dw_ref: {dw_ref}")
+
         f_eef = f_eef_traj[:, i]
         l_eef = l_eef_traj[:, i]
 
-        tau.append(
-            dynamics_recursive_newton_euler(
-                dyn, q, dq, ddq, f_eef, l_eef, v_ref, a_ref, w_ref, dw_ref, g_ref_iter
-            )
-        )
+        # print(f"f_eef: {f_eef}, l_eef: {l_eef}")
+
+        out = dyn.rnem(q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef)
+        tau.append(np.array(out).flatten())  # ensures shape (6,)
+
+
     tau = np.array(tau)
+
     plot_wrench_vs_time_compare(t, tau, tau_cpp, title=f"Wrench Comparison: Python vs C++ real, {type}")
-    # Compute error for each of the 6 variables in tau vs tau_cpp
-    print("Comparing real and c++")
+    print("Comparing real and cpp:")
     if tau.shape[1] == tau_cpp.shape[1]:
         error = np.abs(tau - tau_cpp[:tau.shape[0], :])
         for i in range(6):
@@ -497,7 +495,7 @@ def dynamic_symbolic_test(type):
     else:
         print("tau and tau_cpp have different shapes, cannot compute error.")
 
-    tau_real = dynamics_test(type)
+    tau_real = dynamic_test(type)
     plot_wrench_vs_time_compare(t, tau, tau_real, title=f"Wrench Comparison: CasADi vs Numpy, {type}")
     print("Comparing CasADi vs Numpy:")
     if tau.shape[1] == tau_real.shape[1]:
@@ -533,7 +531,7 @@ def mpc_test():
     plt.show()
 
 def main():
-    mpc_test()
+    # mpc_test()
 
     # Ask user for trajectory type
     print("Select trajectory type:")
@@ -556,7 +554,7 @@ def main():
         traj_type = "const"
 
     # Pass traj_type to test functions
-    dynamics_test(traj_type)
+    dynamic_test(traj_type)
     dynamic_symbolic_test(traj_type)
 
 

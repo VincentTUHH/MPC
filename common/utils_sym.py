@@ -1,5 +1,8 @@
 import casadi as ca
 
+# Define commonly used constants
+GRAVITY_VECTOR = ca.DM([0, 0, -9.81])
+
 def rotation_matrix_from_quat(quat):
     """
     Convert quaternion [w, x, y, z] to rotation matrix (3x3).

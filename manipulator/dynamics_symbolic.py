@@ -35,8 +35,6 @@ class DynamicsSymbolic:
             ) # 3x1 vector, returns DM, as all elements are python numerics
             self.r_i_1_i[0] = self.R_reference.T @ tf_vec
 
-            self.GRAVITY = ca.DM([0, 0, -9.81])  # 3x1 vector, returns DM, as all elements are python numerics
-
             for i in range(1, self.n_links):
                 self.r_i_1_i[i] = self.get_DH_link_offset(*DH_table[i-1]) # must return DM, as self.r_i_1_i[i] is a list of casadi variables
 
@@ -159,13 +157,16 @@ class DynamicsSymbolic:
         return self.TF_iminus1_i[idx-1][0:3, 0:3]
     
     def rnem_symbolic(self, q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef):
-        g_ref = utils_sym.rotation_matrix_from_quat(quaternion_ref).T @ self.GRAVITY
+        g_ref = utils_sym.rotation_matrix_from_quat(quaternion_ref).T @ utils_sym.GRAVITY_VECTOR
         self.update(q)
         self.forward_link0(v_ref, a_ref, w_ref, dw_ref, g_ref) # base linnk 0
         self.forward(q, dq, ddq) # link 1 to 4 with their joints 
         self.forward_eef() # link 5 = link eef, no active joint just coordinate transformation
         self.backward_eef(f_eef, l_eef) # link 5 = link eef
         self.backward() # link 4 to 0
+        return self.get_reference_wrench()
+
+    def get_reference_wrench(self):
         R_T = self.R_reference.T
         return ca.vertcat(-R_T @ self.f[0], -R_T @ self.l[0])
 
@@ -321,17 +322,6 @@ class DynamicsSymbolic:
                 + S_w @ (I @ w)
                 + l_a
             )
-
-    def compute_damping(self, idx):
-        """
-        Compute damping matrices for link idx using CasADi.
-        """
-        v_b = self.v_b[idx]
-        v_b_abs = ca.fabs(v_b)
-        D_t = -ca.diag(self.nonlin_damp_param[idx][0:3] * v_b_abs[0:3] + self.lin_damp_param[idx][0:3])
-        D_r = -ca.diag(self.nonlin_damp_param[idx][3:6] * v_b_abs[3:6] + self.lin_damp_param[idx][3:6])
-        self.D_t[idx] = D_t
-        self.D_r[idx] = D_r
 
     def rnem_function_symbolic(self):
         q = ca.MX.sym('q', self.n_joints)
