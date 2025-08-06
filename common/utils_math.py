@@ -3,6 +3,7 @@ from scipy.spatial.transform import Rotation as Rot
 import yaml
 from copy import deepcopy
 from types import SimpleNamespace
+import pandas as pd
 
 # Define commonly used constants
 GRAVITY_VECTOR = np.array([0, 0, -9.81])
@@ -136,6 +137,26 @@ def load_joint_limits(yaml_filename):
         joint_velocities.append(entry.get('velocity', None))
         all_joints[joint_name] = entry
     return joint_limits, joint_efforts, joint_velocities, all_joints
+
+def load_all_thruster_data(file_path):
+    voltages = [10, 12, 14, 16, 18, 20]
+    data = {}
+    for v in voltages:
+        fname = f'multiplied_cleaned_T200_{v}V.csv'
+        data_path = file_path + fname
+        d = read_thruster_csv(data_path)
+        data[v] = {
+            'pwm': d['PWM (mus)'],
+            'force': d['Force (N)']
+        }
+    return data
+
+def read_thruster_csv(csv_path):
+    df = pd.read_csv(csv_path, sep=';', decimal=',', engine='python')
+    df.dropna(axis=0, how='all', inplace=True)
+    df.dropna(axis=1, how='all', inplace=True)
+    data = {col.strip(): df[col].to_numpy() for col in df.columns}
+    return data
 
 def load_dynamic_params(file_paths):
     merged_dict = {}
