@@ -8,7 +8,6 @@ class Kinematics:
         self.DH_table = np.array(DH_table)
         self.n_joints = self.DH_table.shape[0] - 1
         self.q0 = self.DH_table[:, 1].copy()
-        self.e3 = np.array([0, 0, 1])
         self.TF_i = [np.zeros((4, 4)) for _ in range(self.n_joints + 1)]
         self.TF_iminus1_i = [np.zeros((4, 4)) for _ in range(self.n_joints + 1)]
         self.update(np.zeros(self.n_joints))
@@ -22,46 +21,20 @@ class Kinematics:
             raise ValueError(f"Expected q of length {self.n_joints}, got {q.shape[0]}")
         self.updateDHTable(q)
         self.TF_i[0] = utils_math.dh2matrix(*self.DH_table[0])
+        self.TF_iminus1_i[0] = self.TF_i[0]
         for i in range(1, self.n_joints + 1):
             self.TF_iminus1_i[i] = utils_math.dh2matrix(*self.DH_table[i])
             self.TF_i[i] = self.TF_i[i-1] @ self.TF_iminus1_i[i]
+
+    def get_rotation_iminus1_i(self, idx):
+        return self.TF_iminus1_i[idx-1][:3, :3]
 
     def get_eef_position(self):
         return np.array(self.TF_i[-1][:3, 3])
 
     def get_eef_attitude(self):
         R = self.TF_i[-1][:3, :3]
-        m00, m01, m02 = R[0, 0], R[0, 1], R[0, 2]
-        m10, m11, m12 = R[1, 0], R[1, 1], R[1, 2]
-        m20, m21, m22 = R[2, 0], R[2, 1], R[2, 2]
-        tr = m00 + m11 + m22
-
-        if tr > 0:
-            S = np.sqrt(tr + 1.0) * 2  # S=4*qw
-            qw = 0.25 * S
-            qx = (m21 - m12) / S
-            qy = (m02 - m20) / S
-            qz = (m10 - m01) / S
-        elif (m00 > m11) and (m00 > m22):
-            S = np.sqrt(1.0 + m00 - m11 - m22) * 2  # S=4*qx
-            qw = (m21 - m12) / S
-            qx = 0.25 * S
-            qy = (m01 + m10) / S
-            qz = (m02 + m20) / S
-        elif m11 > m22:
-            S = np.sqrt(1.0 + m11 - m00 - m22) * 2  # S=4*qy
-            qw = (m02 - m20) / S
-            qx = (m01 + m10) / S
-            qy = 0.25 * S
-            qz = (m12 + m21) / S
-        else:
-            S = np.sqrt(1.0 + m22 - m00 - m11) * 2  # S=4*qz
-            qw = (m10 - m01) / S
-            qx = (m02 + m20) / S
-            qy = (m12 + m21) / S
-            qz = 0.25 * S
-        quat = np.array([qw, qx, qy, qz])
-        return quat
+        return utils_math.rotation_matrix_to_quaternion(R)
 
     def get_link_position(self, idx):
         return self.TF_i[idx][:3, 3]
@@ -71,9 +44,9 @@ class Kinematics:
         p_eef = self.get_eef_position()
         for i in range(self.n_joints):
             if i == 0:
-                J[:, i] = np.cross(self.e3, p_eef)
+                J[:, i] = np.cross(utils_math.UNIT_Z, p_eef)
             else:
-                z = self.TF_i[i-1][:3, :3] @ self.e3
+                z = self.TF_i[i-1][:3, :3] @ utils_math.UNIT_Z
                 p = self.TF_i[i-1][:3, 3]
                 J[:, i] = np.cross(z, p_eef - p)
         return J
@@ -82,9 +55,9 @@ class Kinematics:
         J = np.zeros((3, self.n_joints))
         for i in range(self.n_joints):
             if i == 0:
-                J[:, i] = self.e3
+                J[:, i] = utils_math.UNIT_Z
             else:
-                J[:, i] = self.TF_i[i-1][:3, :3] @ self.e3
+                J[:, i] = self.TF_i[i-1][:3, :3] @ utils_math.UNIT_Z
         return J
 
     def get_full_jacobian(self):

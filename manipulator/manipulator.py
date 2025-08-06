@@ -3,6 +3,7 @@ import casadi as ca
 import time
 import matplotlib.pyplot as plt
 from manipulator.kinematics import Kinematics
+from manipulator.kinematics_symbolic import KinematicsSymbolic
 from manipulator.dynamics import Dynamics
 from manipulator.dynamics_symbolic import DynamicsSymbolic
 from scipy.spatial.transform import Rotation as R
@@ -240,7 +241,8 @@ def run_mpc(DH_table, joint_limits, joint_efforts, joint_velocities):
     dt = 1/ fps
     M, N = T_trajectory * fps, 10
     n_joints = DH_table.shape[0] - 1
-    kin = Kinematics(DH_table)
+    kin_sym = KinematicsSymbolic(DH_table)
+    eef_pose_fun = kin_sym.eef_pose_function()
     q_traj, _, _, _ = excitation_trajectory_with_fourier(T=T_trajectory, fps=fps)
     # q_traj = generate_trajectory_with_limits(DH_table, joint_limits, joint_velocities, T_trajectory, fps)
     ref_eef_positions, ref_eef_attitudes, all_links = compute_forward_kinematics(DH_table, q_traj)
@@ -261,7 +263,7 @@ def run_mpc(DH_table, joint_limits, joint_efforts, joint_velocities):
         ref_pos_for_horizon = ref_eef_positions[step:step+N, :].T
         ref_att_for_horizon = ref_eef_attitudes[step:step+N, :].T
         q_opt, u_optimal_horizon, Jopt = solve_cftoc(
-            kin, N, dt, n_joints, q_real[:, step], ref_pos_for_horizon, ref_att_for_horizon,
+            eef_pose_fun, N, dt, n_joints, q_real[:, step], ref_pos_for_horizon, ref_att_for_horizon,
             joint_limits, joint_efforts, joint_velocities
         )
         q_predict[:, :, step] = q_opt
@@ -276,7 +278,7 @@ def run_mpc(DH_table, joint_limits, joint_efforts, joint_velocities):
         predErr[0, i] = np.sum(np.linalg.norm(Error, axis=0))
     return q_real, q_traj, predErr, cost, ref_eef_positions, ref_eef_attitudes, all_links
 
-def solve_cftoc(kin, N, dt, n_joints, q0, ref_eef_positions, ref_eef_attitudes, joint_limits, joint_efforts, joint_velocities):
+def solve_cftoc(eef_pose_fun, N, dt, n_joints, q0, ref_eef_positions, ref_eef_attitudes, joint_limits, joint_efforts, joint_velocities):
     ref_eef_positions = ca.DM(ref_eef_positions)
     ref_eef_attitudes = ca.DM(ref_eef_attitudes)
     q0 = ca.DM(q0)
@@ -316,13 +318,11 @@ def solve_cftoc(kin, N, dt, n_joints, q0, ref_eef_positions, ref_eef_attitudes, 
     R = ca.DM.eye(n_joints) * 0.001
     cost = 0
     for i in range(N):
-        eef_pose = kin.forward_kinematics_symbolic(q[:, i])
-        pos_k = eef_pose[:3, 3]
-        R_eef = eef_pose[:3, :3]
-        att_k = utils_sym.rotation_matrix_to_quaternion(R_eef)
+        eef_pose = eef_pose_fun(q[:, i])  # shape: (7, 1)
+        pos_k = eef_pose[0:3]
+        att_k = eef_pose[3:7]
         pos_error = ref_eef_positions[:, i] - pos_k
         att_error = quaternion_error(ref_eef_attitudes[:, i], att_k)
-        cost += ca.sumsqr(pos_error) + ca.sumsqr(att_error)
         cost += ca.mtimes([pos_error.T, Q, pos_error]) + ca.mtimes([att_error.T, Q, att_error]) + ca.mtimes([u[:, i].T, R, u[:, i]])
     opti.minimize(cost)
     sol = opti.solve()
@@ -531,7 +531,7 @@ def mpc_test():
     plt.show()
 
 def main():
-    # mpc_test()
+    mpc_test()
 
     # Ask user for trajectory type
     print("Select trajectory type:")

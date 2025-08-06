@@ -7,6 +7,8 @@ from types import SimpleNamespace
 # Define commonly used constants
 GRAVITY_VECTOR = np.array([0, 0, -9.81])
 
+UNIT_Z = np.array([0, 0, 1])
+
 def rotation_matrix_from_quat(q):
     """
     Convert quaternion [w, x, y, z] to rotation matrix (3x3).
@@ -41,6 +43,39 @@ def euler_to_quat(roll, pitch, yaw):
     y = cr * sp * cy + sr * cp * sy
     z = cr * cp * sy - sr * sp * cy
     return np.array([w, x, y, z])
+
+def rotation_matrix_to_quaternion(R):
+    m00, m01, m02 = R[0, 0], R[0, 1], R[0, 2]
+    m10, m11, m12 = R[1, 0], R[1, 1], R[1, 2]
+    m20, m21, m22 = R[2, 0], R[2, 1], R[2, 2]
+    tr = m00 + m11 + m22
+
+    if tr > 0:
+        S = np.sqrt(tr + 1.0) * 2  # S=4*qw
+        qw = 0.25 * S
+        qx = (m21 - m12) / S
+        qy = (m02 - m20) / S
+        qz = (m10 - m01) / S
+    elif (m00 > m11) and (m00 > m22):
+        S = np.sqrt(1.0 + m00 - m11 - m22) * 2  # S=4*qx
+        qw = (m21 - m12) / S
+        qx = 0.25 * S
+        qy = (m01 + m10) / S
+        qz = (m02 + m20) / S
+    elif m11 > m22:
+        S = np.sqrt(1.0 + m11 - m00 - m22) * 2  # S=4*qy
+        qw = (m02 - m20) / S
+        qx = (m01 + m10) / S
+        qy = 0.25 * S
+        qz = (m12 + m21) / S
+    else:
+        S = np.sqrt(1.0 + m22 - m00 - m11) * 2  # S=4*qz
+        qw = (m10 - m01) / S
+        qx = (m02 + m20) / S
+        qy = (m12 + m21) / S
+        qz = 0.25 * S
+    quat = np.array([qw, qx, qy, qz])
+    return quat
 
 def skew(v):
     """

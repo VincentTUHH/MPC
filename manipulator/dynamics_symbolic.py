@@ -1,6 +1,7 @@
 import casadi as ca
 import numpy as np
 import common.utils_sym as utils_sym
+from manipulator.kinematics_symbolic import KinematicsSymbolic
 
 # all variables used together with the optimization variable must be casadi variabeles
 # variables taht are constant should be DM as they are faster to evaluate
@@ -13,13 +14,7 @@ import common.utils_sym as utils_sym
 
 class DynamicsSymbolic:
     def __init__(self, this_DH_table, alpha_params):
-        DH_table = np.array(this_DH_table)
-        self.DH_table = ca.MX(DH_table)
-        self.n_joints = DH_table.shape[0] - 1
-        self.q0 = ca.DM(DH_table[:, 1])
-        self.e3 = ca.vertcat(0, 0, 1) # 3x1 vector, returns DM, as all elements are python numerics
-        self.TF_iminus1_i = [ca.MX.eye(4) for _ in range(self.n_joints + 1)]
-        self.update(ca.MX.zeros(self.n_joints, 1))
+        self.kinematics_ = KinematicsSymbolic(this_DH_table)
 
         if alpha_params is not None:
             
@@ -36,7 +31,7 @@ class DynamicsSymbolic:
             self.r_i_1_i[0] = self.R_reference.T @ tf_vec
 
             for i in range(1, self.n_links):
-                self.r_i_1_i[i] = self.get_DH_link_offset(*DH_table[i-1]) # must return DM, as self.r_i_1_i[i] is a list of casadi variables
+                self.r_i_1_i[i] = self.get_DH_link_offset(*this_DH_table[i-1]) # must return DM, as self.r_i_1_i[i] is a list of casadi variables
 
             self.inertial = [getattr(alpha_params, f'link_{i}').inertial for i in range(self.n_links)]
             self.active = [getattr(alpha_params, f'link_{i}').active for i in range(self.n_links)]
@@ -142,23 +137,10 @@ class DynamicsSymbolic:
         ])
         out = R_alpha.T @ np.array([a, 0, d])
         return ca.DM(out)
-
-    def updateDHTable(self, q):
-        for i in range(self.n_joints):
-            self.DH_table[i, 1] = self.q0[i] + q[i]
-
-    def update(self, q):
-        self.updateDHTable(q)
-        self.TF_iminus1_i[0] = utils_sym.dh2matrix(*[self.DH_table[0, j] for j in range(4)])
-        for i in range(1, self.n_joints + 1):
-            self.TF_iminus1_i[i] = utils_sym.dh2matrix(*[self.DH_table[i, j] for j in range(4)])
-
-    def get_rotation_iminus1_i(self, idx):
-        return self.TF_iminus1_i[idx-1][0:3, 0:3]
     
     def rnem_symbolic(self, q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef):
         g_ref = utils_sym.rotation_matrix_from_quat(quaternion_ref).T @ utils_sym.GRAVITY_VECTOR
-        self.update(q)
+        self.kinematics_.update(q)
         self.forward_link0(v_ref, a_ref, w_ref, dw_ref, g_ref) # base linnk 0
         self.forward(q, dq, ddq) # link 1 to 4 with their joints 
         self.forward_eef() # link 5 = link eef, no active joint just coordinate transformation
@@ -203,8 +185,8 @@ class DynamicsSymbolic:
 
     def forward(self, q, dq, ddq):
         w_prev, dw_prev, g_prev, v_prev, a_prev = self.w[0], self.dw[0], self.g[0], self.v[0], self.a[0]
-        for idx in range(1, self.n_joints+1):
-            R_T = self.get_rotation_iminus1_i(idx).T
+        for idx in range(1, self.kinematics_.n_joints+1):
+            R_T = self.kinematics_.get_rotation_iminus1_i(idx).T
             r_i = self.r_i_1_i[idx]
             z_R = R_T[:, 2]  # z-axis in the current frame
             w = R_T @ w_prev + dq[idx-1] * z_R
@@ -242,7 +224,7 @@ class DynamicsSymbolic:
 
     def forward_eef(self):
         w_prev, dw_prev, g_prev, v_prev, a_prev = self.w[-2], self.dw[-2], self.g[-2], self.v[-2], self.a[-2]
-        R_T = self.get_rotation_iminus1_i(self.n_links-1).T
+        R_T = self.kinematics_.get_rotation_iminus1_i(self.n_links-1).T
         r_i = self.r_i_1_i[-1]
         w = R_T @ w_prev
         dw = R_T @ dw_prev
@@ -263,7 +245,7 @@ class DynamicsSymbolic:
 
     def backward(self):
         for idx in range(self.n_links-2, -1, -1):
-            R = self.get_rotation_iminus1_i(idx+1)
+            R = self.kinematics_.get_rotation_iminus1_i(idx+1)
             f_next = R @ self.f[idx+1]
             l_next = R @ self.l[idx+1]
 
@@ -324,9 +306,9 @@ class DynamicsSymbolic:
             )
 
     def rnem_function_symbolic(self):
-        q = ca.MX.sym('q', self.n_joints)
-        dq = ca.MX.sym('dq', self.n_joints)
-        ddq = ca.MX.sym('ddq', self.n_joints)
+        q = ca.MX.sym('q', self.kinematics_.n_joints)
+        dq = ca.MX.sym('dq', self.kinematics_.n_joints)
+        ddq = ca.MX.sym('ddq', self.kinematics_.n_joints)
         v_ref = ca.MX.sym('v_ref', 3)
         a_ref = ca.MX.sym('a_ref', 3)
         w_ref = ca.MX.sym('w_ref', 3)

@@ -1,15 +1,10 @@
 import numpy as np
 import common.utils_math as utils_math
+import manipulator.kinematics as kinematics
 
 class Dynamics:
     def __init__(self, DH_table, alpha_params=None):
-        self.DH_table = np.array(DH_table)
-        self.n_joints = self.DH_table.shape[0] - 1
-        self.q0 = self.DH_table[:, 1].copy()
-        self.e3 = np.array([0, 0, 1])
-        self.TF_i = [np.eye(4) for _ in range(self.n_joints + 1)]
-        self.TF_iminus1_i = [np.eye(4) for _ in range(self.n_joints + 1)]
-        self.update(np.zeros(self.n_joints))
+        self.kinematics_ = kinematics.Kinematics(DH_table)
 
         if alpha_params is not None:
             self.n_links = len(alpha_params.__dict__)
@@ -25,7 +20,7 @@ class Dynamics:
             self.r_i_1_i[0] = self.R_reference.T @ tf_vec
 
             for i in range(1, self.n_links):
-                self.r_i_1_i[i] = self.get_DH_link_offset(*self.DH_table[i-1])
+                self.r_i_1_i[i] = self.get_DH_link_offset(*self.kinematics_.DH_table[i-1])
 
             self.inertial = [getattr(alpha_params, f'link_{i}').inertial for i in range(self.n_links)]
             self.active = [getattr(alpha_params, f'link_{i}').active for i in range(self.n_links)]
@@ -123,21 +118,6 @@ class Dynamics:
         ])
         return R_alpha.T @ np.array([a, 0, d])
 
-    def updateDHTable(self, q):
-        self.DH_table[:self.n_joints, 1] = self.q0[:self.n_joints] + q
-
-    def update(self, q):
-        q = np.asarray(q)
-        self.updateDHTable(q)
-        self.TF_i[0] = utils_math.dh2matrix(*self.DH_table[0])
-        self.TF_iminus1_i[0] = self.TF_i[0]
-        for i in range(1, self.n_joints + 1):
-            self.TF_iminus1_i[i] = utils_math.dh2matrix(*self.DH_table[i])
-            self.TF_i[i] = self.TF_i[i-1] @ self.TF_iminus1_i[i]
-
-    def get_rotation_iminus1_i(self, idx):
-        return self.TF_iminus1_i[idx-1][:3, :3]
-
     def forward_link0(self, v_ref, a_ref, w_ref, dw_ref, g_ref):
         R_T = self.R_reference.T
         w0 = R_T @ w_ref
@@ -158,11 +138,11 @@ class Dynamics:
         self.dv_c[0] = self.a_c[0] - S_w0 @ self.v_c[0]
 
     def forward(self, q, dq, ddq):
-        for idx in range(1, self.n_joints + 1):
+        for idx in range(1, self.kinematics_.n_joints + 1):
             self.link_forward(idx, q[idx-1], dq[idx-1], ddq[idx-1])
 
     def link_forward(self, idx, q, dq, ddq):
-        R_T = self.get_rotation_iminus1_i(idx).T
+        R_T = self.kinematics_.get_rotation_iminus1_i(idx).T
         prev_w, prev_dw, prev_g, prev_v, prev_a = self.w[idx-1], self.dw[idx-1], self.g[idx-1], self.v[idx-1], self.a[idx-1]
         r_i = self.r_i_1_i[idx]
         if not self.active[idx]:
@@ -186,7 +166,7 @@ class Dynamics:
     def forward_eef(self):
         idx = self.n_links - 1
         prev = idx - 1
-        R_T = self.get_rotation_iminus1_i(prev+1).T
+        R_T = self.kinematics_.get_rotation_iminus1_i(prev+1).T
         r_i = self.r_i_1_i[idx]
         w = R_T @ self.w[prev]
         dw = R_T @ self.dw[prev]
@@ -206,8 +186,8 @@ class Dynamics:
             self.link_backward(idx)
 
     def link_backward(self, idx):
-        f_next = self.get_rotation_iminus1_i(idx+1) @ self.f[idx+1]
-        l_next = self.get_rotation_iminus1_i(idx+1) @ self.l[idx+1]
+        f_next = self.kinematics_.get_rotation_iminus1_i(idx+1) @ self.f[idx+1]
+        l_next = self.kinematics_.get_rotation_iminus1_i(idx+1) @ self.l[idx+1]
         if self.inertial[idx]:
             v_b_abs = np.abs(self.v_b[idx])
             w_abs = np.abs(self.w[idx])
@@ -245,7 +225,7 @@ class Dynamics:
     def rnem(self, q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef):
         R_quat = utils_math.rotation_matrix_from_quat(quaternion_ref)
         g_ref = R_quat.T @ utils_math.GRAVITY_VECTOR
-        self.update(q)
+        self.kinematics_.update(q)
         self.forward_link0(v_ref, a_ref, w_ref, dw_ref, g_ref)
         self.forward(q, dq, ddq)
         self.forward_eef()
