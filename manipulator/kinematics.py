@@ -1,6 +1,4 @@
 import numpy as np
-import casadi as ca
-import common.utils_sym as utils_sym
 import common.utils_math as utils_math
 
 class Kinematics:
@@ -62,15 +60,3 @@ class Kinematics:
 
     def get_full_jacobian(self):
         return np.vstack((self.get_position_jacobian(), self.get_rotation_jacobian()))
-
-    def forward_kinematics_symbolic(self, q_sym):
-        TF = ca.MX.eye(4)
-        for i in range(self.n_joints + 1):
-            d       = ca.MX(self.DH_table[i, 0])
-            theta_0 = ca.MX(self.DH_table[i, 1])
-            a       = ca.MX(self.DH_table[i, 2])
-            alpha   = ca.MX(self.DH_table[i, 3]) # muss ich DH table nicht auch updaten?
-            theta = theta_0 + (q_sym[i] if i < self.n_joints else 0) # die condition vllt falsch
-            TF_i = utils_sym.dh2matrix(d, theta, a, alpha)
-            TF = ca.mtimes(TF, TF_i)
-        return TF
