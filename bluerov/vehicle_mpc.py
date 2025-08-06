@@ -7,6 +7,7 @@ from common.animate import animate_bluerov, plot_vehicle_xy_vs_reference, plot_b
 import time
 from scipy.linalg import solve_continuous_are
 from common.my_package_path import get_package_path
+import casadi as ca
 import common.utils_sym as utils_sym
 import common.utils_math as utils_math
 
@@ -47,6 +48,9 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
     n_dof = 6
     n_thruster = 8
 
+    u_dim = n_thruster if use_pwm else n_dof
+
+
     # in optimization the state variable is:
     # q = [nu, eta] where 
     # nu = [u, v, w, p, q, r] (linear and angular velocities)
@@ -64,6 +68,9 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
         state_dim = n_dof + 7
     else:
         state_dim = n_dof + 6
+
+    integrator_fun = get_integrator_fun(symbolic_bluerov, n_dof, state_dim, u_dim, dt, V_bat, use_pwm, use_quaternion, integrator)
+
 
     q_predict = np.zeros((state_dim, N+1, M))
 
@@ -130,7 +137,7 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
 
         # Solve optimal control problem
         q_opt, u_optimal_horizon, Jopt, prev_g = solve_cftoc(
-            N, n_dof, symbolic_bluerov, q_init, ref_traj_horizon, dt,
+            N, n_dof, integrator_fun, q_init, ref_traj_horizon, dt,
             u0, n_thruster, V_bat, use_pwm, use_quaternion, 
             integrator, opts, prev_g
         )
@@ -145,9 +152,7 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
             def f(x, u):
                 nu = x[:n_dof]
                 eta = x[n_dof:]
-                nu_next, eta_next = integrate_dynamics(
-                    symbolic_bluerov, nu, eta, u, dt, V_bat, use_pwm, False, integrator
-                )
+                nu_next, eta_next = integrator_fun(nu, eta, u)  # Call the integrator function to get next state
                 nu_next = np.array(nu_next, dtype=float).flatten()
                 eta_next = np.array(eta_next, dtype=float).flatten()
                 x_next = np.concatenate([nu_next, eta_next])
@@ -190,13 +195,23 @@ def run_mpc(symbolic_bluerov, real_bluerov, reference_trajectory, T_trajectory, 
     return q_real, cost, u_optimal
 
 # --- Optimal Control Problem ---
-def integrate_dynamics(symbolic_bluerov, nu_k, eta_k, u_k, dt, V_bat, use_pwm, use_quaternion, integrator):
-    # integrator: string, e.g. 'explicit_euler', 'rk4_coupled_coordinates', etc.
-    # Returns nu_next, eta_next
-    if use_pwm:
-        tau = symbolic_bluerov.L * V_bat * (symbolic_bluerov.mixer @ u_k)
+def get_integrator_fun(symbolic_bluerov, n_dof, state_dim, u_dim, dt, V_bat, use_pwm, use_quaternion, integrator):
+    """
+    Returns a CasADi function f(nu_k, eta_k, u_k) -> (nu_next, eta_next)
+    for the specified integrator type.
+    """
+
+    nu_sym = ca.MX.sym('nu', n_dof)
+    if use_quaternion:
+        eta_sym = ca.MX.sym('eta', 7)
     else:
-        tau = u_k
+        eta_sym = ca.MX.sym('eta', 6)
+    u_sym = ca.MX.sym('u', u_dim)
+
+    if use_pwm:
+        tau = symbolic_bluerov.L * V_bat * (symbolic_bluerov.mixer @ u_sym)
+    else:
+        tau = u_sym
 
     if use_quaternion:
         g_fun = symbolic_bluerov.g_quat
@@ -211,88 +226,82 @@ def integrate_dynamics(symbolic_bluerov, nu_k, eta_k, u_k, dt, V_bat, use_pwm, u
         return nu_dot, eta_dot
 
     if integrator == 'explicit_euler':
-        nu_dot, eta_dot = f(nu_k, eta_k)
-        nu_next = nu_k + dt * nu_dot
-        eta_next = eta_k + dt * eta_dot
+        nu_dot, eta_dot = f(nu_sym, eta_sym)
+        nu_next = nu_sym + dt * nu_dot
+        eta_next = eta_sym + dt * eta_dot
         if use_quaternion:
-            # Normalize quaternion part
             pos_next = eta_next[0:3]
             quat_next = eta_next[3:]
             quat_next = quat_next / ca.norm_2(quat_next)
             eta_next = ca.vertcat(pos_next, quat_next)
-        return nu_next, eta_next
+        return ca.Function('integrator_explicit_euler', [nu_sym, eta_sym, u_sym], [nu_next, eta_next])
 
     elif integrator in ['rk4_coupled_coordinates', 'rk4_decoupled_coordinates', 'rk4_coupled_function']:
         # Standard RK4
-        k1_nu, k1_eta = f(nu_k, eta_k)
-        k2_nu, k2_eta = f(nu_k + 0.5 * dt * k1_nu, eta_k + 0.5 * dt * k1_eta)
-        k3_nu, k3_eta = f(nu_k + 0.5 * dt * k2_nu, eta_k + 0.5 * dt * k2_eta)
-        k4_nu, k4_eta = f(nu_k + dt * k3_nu, eta_k + dt * k3_eta)
-        nu_next = nu_k + (dt / 6.0) * (k1_nu + 2 * k2_nu + 2 * k3_nu + k4_nu)
-        eta_next = eta_k + (dt / 6.0) * (k1_eta + 2 * k2_eta + 2 * k3_eta + k4_eta)
+        k1_nu, k1_eta = f(nu_sym, eta_sym)
+        k2_nu, k2_eta = f(nu_sym + 0.5 * dt * k1_nu, eta_sym + 0.5 * dt * k1_eta)
+        k3_nu, k3_eta = f(nu_sym + 0.5 * dt * k2_nu, eta_sym + 0.5 * dt * k2_eta)
+        k4_nu, k4_eta = f(nu_sym + dt * k3_nu, eta_sym + dt * k3_eta)
+        nu_next = nu_sym + (dt / 6.0) * (k1_nu + 2 * k2_nu + 2 * k3_nu + k4_nu)
+        eta_next = eta_sym + (dt / 6.0) * (k1_eta + 2 * k2_eta + 2 * k3_eta + k4_eta)
         if use_quaternion:
             pos_next = eta_next[0:3]
             quat_next = eta_next[3:]
             quat_next = quat_next / ca.norm_2(quat_next)
             eta_next = ca.vertcat(pos_next, quat_next)
-        return nu_next, eta_next
+        return ca.Function('integrator_rk4', [nu_sym, eta_sym, u_sym], [nu_next, eta_next])
 
     elif integrator == 'CasADi_integrator':
         # Use CasADi's built-in integrator
-        state = ca.vertcat(nu_k, eta_k)
-        state_dim = state.size1()
-        u_dim = u_k.size1()
-        x = ca.MX.sym('x', state_dim)
-        u_sym = ca.MX.sym('u', u_dim)
+        state = ca.vertcat(nu_sym, eta_sym)
+        x = ca.MX.sym('x', state.size1())
+        u_param = ca.MX.sym('u', u_dim)
         if use_pwm:
-            tau_sym = symbolic_bluerov.L * V_bat * (symbolic_bluerov.mixer @ u_sym)
+            tau_sym = symbolic_bluerov.L * V_bat * (symbolic_bluerov.mixer @ u_param)
         else:
-            tau_sym = u_sym
-        nu_sym = x[0:nu_k.size1()]
-        eta_sym = x[nu_k.size1():]
+            tau_sym = u_param
+        nu_s = x[0:n_dof]
+        eta_s = x[n_dof:]
         if use_quaternion:
             g_fun_sym = symbolic_bluerov.g_quat
             J_fun_sym = symbolic_bluerov.J_quat
         else:
             g_fun_sym = symbolic_bluerov.g
             J_fun_sym = symbolic_bluerov.J
-        nu_dot_sym = symbolic_bluerov.M_inv @ (tau_sym - symbolic_bluerov.C(nu_sym) @ nu_sym - symbolic_bluerov.D(nu_sym) @ nu_sym - g_fun_sym(eta_sym))
-        eta_dot_sym = J_fun_sym(eta_sym) @ nu_sym
+        nu_dot_sym = symbolic_bluerov.M_inv @ (tau_sym - symbolic_bluerov.C(nu_s) @ nu_s - symbolic_bluerov.D(nu_s) @ nu_s - g_fun_sym(eta_s))
+        eta_dot_sym = J_fun_sym(eta_s) @ nu_s
         ode = ca.vertcat(nu_dot_sym, eta_dot_sym)
-        dae = {'x': x, 'p': u_sym, 'ode': ode}
+        dae = {'x': x, 'p': u_param, 'ode': ode}
         opts = {'tf': dt}
         integrator_fun = ca.integrator('integrator_fun', 'rk', dae, opts)
-        res = integrator_fun(x0=state, p=u_k)
-        state_next = res['xf']
+        xf = integrator_fun(x0=state, p=u_sym)['xf']
         if use_quaternion:
-            pos_next = state_next[nu_k.size1():nu_k.size1()+3]
-            quat_next = state_next[nu_k.size1()+3:]
+            pos_next = xf[n_dof:n_dof+3]
+            quat_next = xf[n_dof+3:]
             quat_next = quat_next / ca.norm_2(quat_next)
             eta_next = ca.vertcat(pos_next, quat_next)
-            nu_next = state_next[0:nu_k.size1()]
+            nu_next = xf[0:n_dof]
         else:
-            nu_next = state_next[0:nu_k.size1()]
-            eta_next = state_next[nu_k.size1():]
-        return nu_next, eta_next
+            nu_next = xf[0:n_dof]
+            eta_next = xf[n_dof:]
+        return ca.Function('integrator_casadi', [nu_sym, eta_sym, u_sym], [nu_next, eta_next])
+
     elif integrator == 'semi_implicit_euler':
-        # Semi-implicit Euler
-        nu_dot, eta_dot = f(nu_k, eta_k)
-        nu_next = nu_k + dt * nu_dot
-        eta_dot_new = J_fun(eta_k) @ nu_next
-        eta_next = eta_k + dt * eta_dot_new
+        nu_dot, eta_dot = f(nu_sym, eta_sym)
+        nu_next = nu_sym + dt * nu_dot
+        eta_dot_new = J_fun(eta_sym) @ nu_next
+        eta_next = eta_sym + dt * eta_dot_new
         if use_quaternion:
-            # Normalize quaternion part
             pos_next = eta_next[0:3]
             quat_next = eta_next[3:]
             quat_next = quat_next / ca.norm_2(quat_next)
             eta_next = ca.vertcat(pos_next, quat_next)
-        return nu_next, eta_next
-
+        return ca.Function('integrator_semi_implicit_euler', [nu_sym, eta_sym, u_sym], [nu_next, eta_next])
 
     else:
         raise ValueError(f"Unknown integrator type: {integrator}")
 
-def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0, n_thruster, V_bat, use_pwm, use_quaternion, integrator, opts, prev_g):
+def solve_cftoc(N, n_dof, integrator_fun, q_init, reference_trajectory, dt, u0, n_thruster, V_bat, use_pwm, use_quaternion, integrator, opts, prev_g):
     opti = ca.Opti()
     if opts is None:
         raise ValueError("Solver options 'opts' must be provided.")
@@ -323,9 +332,7 @@ def solve_cftoc(N, n_dof, symbolic_bluerov, q_init, reference_trajectory, dt, u0
         eta_k = q[n_dof:, k]
         u_k = u[:, k]
         # Use integrate_dynamics for propagation
-        nu_next, eta_next = integrate_dynamics(
-            symbolic_bluerov, nu_k, eta_k, u_k, dt, V_bat, use_pwm, use_quaternion, integrator
-        )
+        nu_next, eta_next = integrator_fun(nu_k, eta_k, u_k)
         opti.subject_to(q[:n_dof, k+1] == nu_next)
         opti.subject_to(q[n_dof:, k+1] == eta_next)
 
