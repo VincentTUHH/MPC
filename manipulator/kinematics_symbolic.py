@@ -56,7 +56,7 @@ class KinematicsSymbolic:
         return J
     
     def get_full_jacobian(self):
-        return ca.vertcat(self.get_position_jacobian(), self.get_rotation_jacobian())
+        return [self.get_position_jacobian(), self.get_rotation_jacobian()]
     
     def eef_pose_function(self):
         """

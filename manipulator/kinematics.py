@@ -59,4 +59,4 @@ class Kinematics:
         return J
 
     def get_full_jacobian(self):
-        return np.vstack((self.get_position_jacobian(), self.get_rotation_jacobian()))
+        return [self.get_position_jacobian(), self.get_rotation_jacobian()]

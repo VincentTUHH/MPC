@@ -5,6 +5,7 @@ the c++ implementation of Niklas Trekel (2023)
 '''
 
 import numpy as np
+import casadi as ca
 from manipulator.dynamics import Dynamics
 from manipulator.dynamics_symbolic import DynamicsSymbolic
 from common.my_package_path import get_package_path
@@ -13,6 +14,8 @@ from common.animate import (
     plot_wrench_vs_time_compare
 )
 import common.utils_math as utils_math
+import manipulator.kinematics as manip_kinematics
+import manipulator.kinematics_symbolic as manip_kinematics_symbolic
 
 # -------------------- Trajectory Generation --------------------
 
@@ -200,7 +203,7 @@ def dynamic_test(type):
         inertial_params_dh_path
     ]
     alpha_params = utils_math.load_dynamic_params(file_paths)
-    dyn = Dynamics(DH_table, alpha_params)
+    dyn = Dynamics(manip_kinematics.Kinematics(DH_table), alpha_params)
     T = 10.0
     q_traj, dq_traj, ddq_traj, t = excitation_trajectory_with_fourier(T=T)
     t_cpp, tau_cpp = utils_math.read_wrench_txt(f'{manipulator_package_path}/data/model_output/01_08_cpp_wrench_on_vehicle_{type}.txt')
@@ -228,6 +231,7 @@ def dynamic_test(type):
         dw_ref = ang_acc_vec_traj[:, i]
         f_eef = f_eef_traj[:, i]
         l_eef = l_eef_traj[:, i]
+        dyn.kinematics_.update(q)
         out = dyn.rnem(q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef)
         tau.append(np.array(out).flatten())
     tau = np.array(tau)
@@ -257,13 +261,37 @@ def dynamic_symbolic_test(type):
         inertial_params_dh_path
     ]
     alpha_params = utils_math.load_dynamic_params(file_paths)
-    dyn = DynamicsSymbolic(DH_table, alpha_params)
+    dyn = DynamicsSymbolic(manip_kinematics_symbolic.KinematicsSymbolic(DH_table), alpha_params)
     T = 10.0
     q_traj, dq_traj, ddq_traj, t = excitation_trajectory_with_fourier(T=T)
     # export_trajectory_txt(f'{manipulator_package_path}/data/states/01_08_joint_excitation_trajectory.txt', t, q_traj, dq_traj, ddq_traj)
     t_cpp, tau_cpp = utils_math.read_wrench_txt(f'{manipulator_package_path}/data/model_output/01_08_cpp_wrench_on_vehicle_{type}.txt')
 
-    rneM_func = dyn.rnem_function_symbolic()
+    def rnem_function_symbolic():
+        n_joints = dyn.kinematics_.n_joints
+        q = ca.MX.sym('q', n_joints)
+        dq = ca.MX.sym('dq', n_joints)
+        ddq = ca.MX.sym('ddq', n_joints)
+        v_ref = ca.MX.sym('v_ref', 3)
+        a_ref = ca.MX.sym('a_ref', 3)
+        w_ref = ca.MX.sym('w_ref', 3)
+        dw_ref = ca.MX.sym('dw_ref', 3)
+        quaternion_ref = ca.MX.sym('quat_ref', 4)
+        f_eef = ca.MX.sym('f_eef', 3)
+        l_eef = ca.MX.sym('l_eef', 3)
+
+        dyn.kinematics_.update(q)
+        tau = dyn.rnem_symbolic(q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef)
+        
+        rnem_func = ca.Function(
+            'rnem_func',
+            [q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef],
+            [tau]
+        )
+        
+        return rnem_func
+    
+    rneM_func = rnem_function_symbolic()
 
     f_eef = np.zeros(3)
     l_eef = np.zeros(3)

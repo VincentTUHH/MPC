@@ -3,8 +3,8 @@ import common.utils_math as utils_math
 import manipulator.kinematics as kinematics
 
 class Dynamics:
-    def __init__(self, DH_table, alpha_params=None):
-        self.kinematics_ = kinematics.Kinematics(DH_table)
+    def __init__(self, kinematics, alpha_params=None):
+        self.kinematics_ = kinematics
 
         if alpha_params is not None:
             self.n_links = len(alpha_params.__dict__)
@@ -12,12 +12,12 @@ class Dynamics:
             self.R_reference = utils_math.rotation_matrix_from_euler(
                 alpha_params.link_0.r, alpha_params.link_0.p, alpha_params.link_0.y
             )
-            tf_vec = np.array([
+            self.tf_vec = np.array([
                 alpha_params.link_0.vec.x,
                 alpha_params.link_0.vec.y,
                 alpha_params.link_0.vec.z
             ])
-            self.r_i_1_i[0] = self.R_reference.T @ tf_vec
+            self.r_i_1_i[0] = self.R_reference.T @ self.tf_vec
 
             for i in range(1, self.n_links):
                 self.r_i_1_i[i] = self.get_DH_link_offset(*self.kinematics_.DH_table[i-1])
@@ -225,7 +225,6 @@ class Dynamics:
     def rnem(self, q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef):
         R_quat = utils_math.rotation_matrix_from_quat(quaternion_ref)
         g_ref = R_quat.T @ utils_math.GRAVITY_VECTOR
-        self.kinematics_.update(q)
         self.forward_link0(v_ref, a_ref, w_ref, dw_ref, g_ref)
         self.forward(q, dq, ddq)
         self.forward_eef()

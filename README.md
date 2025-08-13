@@ -157,3 +157,36 @@ brew update
 
 [Jump to CasADi + IPOPT Setup for macOS (Apple Silicon)](#-macos-users-apple-silicon-casadi--ipopt-setup)
 
+
+## The Code
+
+The codebase is organized in packages. You need to be in the root path to execute with `python3 -m file`
+
+### Manipulator
+
+Proof of Concept to verify the recursive Newton-Euler method against the C++ implementtaion from Trekel23
+```bash
+python3 -m manipulator.poc_manipulator_model
+```
+
+An MPC solely for a manipulator that is earth fixed at (0, 0, 0). Uses only kinematic equations.
+```bash
+python3 -m manipulator.manipulator_kinematics_mpc
+```
+
+### Bluerov
+
+Simulate the BlueROV on different trajectories.
+```bash
+python3 -m bluerov.bluerov
+```
+
+Estimates a (linear) model of the thruster using its characteristic curves at different voltages (see Blue Robotics).
+```bash
+python3 -m bluerov.thruster_model
+```
+
+An MPC solely for the BlueROV to track trajectories on the basis of Fossen's equation of motion.
+```bash
+python3 -m bluerov.vehicle_mpc
+```

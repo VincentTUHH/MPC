@@ -213,3 +213,26 @@ def quaternion_error_Niklas(q_goal, q_current):
     ])
     att_error = w_g * v_c - w_c * v_g - goal_att_tilde @ v_c
     return np.linalg.norm(att_error)
+
+def quat_mult(q1, q2):
+    # Hamilton product of two quaternions
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    return np.array([w, x, y, z])
+
+def quaternion_error(q_goal, q_current):
+    # Choose shortest path on quaternion sphere
+    if np.dot(q_goal, q_current) < 0:
+        q_goal_adj = -q_goal
+    else:
+        q_goal_adj = q_goal
+    # Conjugate of q_current
+    q_current_conj = np.array([q_current[0], -q_current[1], -q_current[2], -q_current[3]])
+    # Error quaternion
+    q_err = quat_mult(q_goal_adj, q_current_conj)
+    # Vector part as error (for small angles proportional to rotation axis)
+    return 2 * q_err[1:4]
