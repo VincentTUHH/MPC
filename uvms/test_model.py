@@ -2,6 +2,7 @@ import uvms.model as uvms_model
 from common.my_package_path import get_package_path
 import common.utils_math as utils_math
 import numpy as np
+import common.animate as animate
 
 
 def main():
@@ -18,20 +19,47 @@ def main():
     ]
     alpha_params = utils_math.load_dynamic_params(file_paths)
 
-    uvms_model_instance = uvms_model.UVMSModel(DH_table, alpha_params)
+    bluerov_package_path = get_package_path('bluerov')
+    bluerov_params_path = bluerov_package_path + "/config/model_params.yaml"
+    bluerov_params = utils_math.load_model_params(bluerov_params_path)
+
+    q0 = np.array([np.pi, np.pi * 0.5, np.pi * 0.75, np.pi * 0.5])
+    pos = np.array([0.0, 0.0, 0.0])
+    att = np.array([0.0, 0.0, np.pi/4])  # Euler angles
+    vel = np.array([0.0, 0.0, 0.0])
+    omega = np.array([0.0, 0.0, 0.0])
+
+    uvms_model_instance = uvms_model.UVMSModel(DH_table, alpha_params, bluerov_params, q0, pos, att, vel, omega)
     print("UVMS Model initialized successfully.")
 
-    # print("r_B_0:", uvms_model_instance.r_B_0)
-    # print("R_B_0:", uvms_model_instance.R_B_0)
+    use_pwm = True
 
-    uvms_model_instance.update(np.array([0.0, 0.0, 0.0, 0.0]),
-                               np.array([0.0, 0.0, 0.0]),
-                               utils_math.euler_to_quat(0.0, 0.0, 0.0))
-    # print("End-effector position in inertial frame: \n", uvms_model_instance.p_eef)
-    # print("End-effector attitude in inertial frame: \n", utils_math.rotation_matrix_from_quat(uvms_model_instance.att_eef))
+    uv = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # Example control input
+    # uv = np.array([0.0, 0.0, 0.0, 0.0, 0.2, -0.2, -0.2, 0.2])  # Example control input
+    uq = np.array([0.0, 0.0, 0.0, 0.0])  # Example joint velocities
+    dt = 0.05
+    V_bat = 16.0  # Example battery voltage
 
+    eta_history = []
+
+    joint_history = []
+
+    for _ in range(100):
+        uvms_model_instance.update(dt, uq, uv, use_pwm, V_bat) 
+        eta, joint_positions = uvms_model_instance.get_uvms_configuration()
+
+        eta_history.append(eta.reshape(1, -1))  # Ensure eta is row-wise
+        joint_history.append(joint_positions.copy())
+
+    eta_history = np.vstack(eta_history)  # Stack rows for eta_history
+
+    eta_history = np.array(eta_history)
+    joint_history = np.array(joint_history)
+
+    # print(eta_history) 
+    # print(joint_history)
+    animate.animate_uvms(eta_history, joint_history, dt)
     
-
 
 if __name__ == "__main__":
     main()

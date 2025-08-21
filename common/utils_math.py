@@ -14,6 +14,7 @@ def rotation_matrix_from_quat(q):
     """
     Convert quaternion [w, x, y, z] to rotation matrix (3x3).
     """
+    q = np.asarray(q).reshape(-1)  # Ensure shape is (4,)
     return Rot.from_quat(q, scalar_first=True).as_matrix()
 
 def rotation_matrix_from_euler(phi, theta, psi):
@@ -44,6 +45,19 @@ def euler_to_quat(roll, pitch, yaw):
     y = cr * sp * cy + sr * cp * sy
     z = cr * cp * sy - sr * sp * cy
     return np.array([w, x, y, z])
+
+def quat_to_euler(q):
+    # Ensure quaternion is in [w, x, y, z] format
+    q = np.asarray(q).reshape(-1)
+    # If w < 0, flip sign to avoid ambiguity in Euler angles
+    if q[0] < 0:
+        q = -q
+    # Use scipy Rotation object to convert quaternion to euler angles
+    r = Rot.from_quat(q, scalar_first=True)
+    # Use extrinsic ZYX convention to match rotation_matrix_from_euler
+    # scipy returns [yaw, pitch, roll], so reverse to [roll, pitch, yaw]
+    euler = r.as_euler('ZYX', degrees=False)
+    return euler[::-1]  # Return [roll, pitch, yaw]
 
 def rotation_matrix_to_quaternion(R):
     m00, m01, m02 = R[0, 0], R[0, 1], R[0, 2]

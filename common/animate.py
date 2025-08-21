@@ -3,6 +3,7 @@ from matplotlib.animation import FuncAnimation
 import numpy as np
 from matplotlib.lines import Line2D
 from scipy.spatial.transform import Rotation as R
+from mpl_toolkits.mplot3d import Axes3D
 
 def animate_trajectory(all_links, fps=50):
     timesteps = all_links.shape[0]
@@ -162,7 +163,98 @@ def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
 
     ani = FuncAnimation(fig, update, frames=eta_all.shape[0], interval=dt*1000)
     plt.show()
-    
+
+def animate_uvms(eta_all, all_links, dt, box_size=(0.4571, 0.575, 0.2539)):
+    """
+    Animate the trajectory of a UVMS (vehicle + manipulator) in 3D space.
+    - eta_all: (n_steps, 6) vehicle pose [x, y, z, phi, theta, psi]
+    - all_links: (n_steps, n_links, 3) manipulator joint positions in world frame
+    - dt: sampling time
+    - box_size: vehicle bounding box dimensions
+    """
+
+    def plot_vehicle(ax, eta, box_size):
+        pos = eta[:3]
+        phi, theta, psi = eta[3:6]
+        rot = R.from_euler('zyx', [psi, theta, phi]).as_matrix()
+        l, w, h = box_size
+        corners = np.array([
+            [ l/2,  w/2, -h/2],
+            [ l/2, -w/2, -h/2],
+            [-l/2, -w/2, -h/2],
+            [-l/2,  w/2, -h/2],
+            [ l/2,  w/2,  h/2],
+            [ l/2, -w/2,  h/2],
+            [-l/2, -w/2,  h/2],
+            [-l/2,  w/2,  h/2]
+        ])
+        corners_world = (rot @ corners.T).T + pos
+        box_lines = [
+            [0,1],[1,2],[2,3],[3,0],
+            [4,5],[5,6],[6,7],[7,4],
+            [0,4],[1,5],[2,6],[3,7]
+        ]
+        for i,j in box_lines:
+            ax.plot(*zip(corners_world[i], corners_world[j]), color='b')
+        ax.scatter(*pos, color='r', s=40, label='CoG')
+        axis_len = 0.3
+        origin = pos
+        x_axis = origin + rot @ np.array([axis_len, 0, 0])
+        y_axis = origin + rot @ np.array([0, axis_len, 0])
+        z_axis = origin + rot @ np.array([0, 0, axis_len])
+        ax.plot(*zip(origin, x_axis), color='r')
+        ax.plot(*zip(origin, y_axis), color='g')
+        ax.plot(*zip(origin, z_axis), color='b')
+
+    timesteps = all_links.shape[0]
+    x_min = np.min(np.concatenate([all_links[:, :, 0], eta_all[:, 0, None]], axis=1))
+    x_max = np.max(np.concatenate([all_links[:, :, 0], eta_all[:, 0, None]], axis=1))
+    y_min = np.min(np.concatenate([all_links[:, :, 1], eta_all[:, 1, None]], axis=1))
+    y_max = np.max(np.concatenate([all_links[:, :, 1], eta_all[:, 1, None]], axis=1))
+    z_min = np.min(np.concatenate([all_links[:, :, 2], eta_all[:, 2, None]], axis=1))
+    z_max = np.max(np.concatenate([all_links[:, :, 2], eta_all[:, 2, None]], axis=1))
+    margin = 0.05
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    z_range = z_max - z_min
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_xlim([-1, 1])
+    ax.set_ylim([-1, 1])
+    ax.set_zlim([-2, 1])
+    ax.set_xlabel('X [m]')
+    ax.set_ylabel('Y [m]')
+    ax.set_zlabel('Z [m]')
+
+    arm_line, = ax.plot([], [], [], 'o-', lw=2, markersize=4, color='tab:blue')
+    eef_point, = ax.plot([], [], [], 'ro', markersize=6, label='End Effector')
+
+    def update(frame):
+        ax.cla()
+        ax.set_xlim([-1, 1])
+        ax.set_ylim([-1, 1])
+        ax.set_zlim([-1, 0])
+        ax.set_xlabel('X [m]')
+        ax.set_ylabel('Y [m]')
+        ax.set_zlabel('Z [m]')
+        plot_vehicle(ax, eta_all[frame], box_size=box_size)
+        links = all_links[frame]
+        ax.plot(links[:, 0], links[:, 1], links[:, 2], 'o-', lw=2, markersize=4, color='tab:blue', label='Manipulator')
+        ax.plot([links[-1, 0]], [links[-1, 1]], [links[-1, 2]], 'ro', markersize=8, label='End Effector')
+        legend_elements = [
+            Line2D([0], [0], color='r', lw=2, label='X axis'),
+            Line2D([0], [0], color='g', lw=2, label='Y axis'),
+            Line2D([0], [0], color='b', lw=2, label='Z axis'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='r', markersize=8, label='CoG'),
+            Line2D([0], [0], marker='o', color='tab:blue', markersize=6, label='Manipulator'),
+            Line2D([0], [0], marker='o', color='r', markersize=8, label='End Effector')
+        ]
+        ax.legend(handles=legend_elements, loc='upper left')
+        ax.set_title(f"Step {frame} (t={frame*dt:.2f}s)")
+
+    ani = FuncAnimation(fig, update, frames=timesteps, interval=dt*1000)
+    plt.show()
 
 def plot_vehicle_pos_vs_reference(ref_positions, real_positions):
     fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)

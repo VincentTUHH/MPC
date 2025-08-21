@@ -232,6 +232,16 @@ class Dynamics:
         self.backward()
         return self.get_reference_wrench()
     
+    def rnem_euler(self, q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, euler_ref, f_eef, l_eef):
+        R_quat = utils_math.rotation_matrix_from_euler(*euler_ref)
+        g_ref = R_quat.T @ utils_math.GRAVITY_VECTOR
+        self.forward_link0(v_ref, a_ref, w_ref, dw_ref, g_ref)
+        self.forward(q, dq, ddq)
+        self.forward_eef()
+        self.backward_eef(f_eef, l_eef)
+        self.backward()
+        return self.get_reference_wrench()
+    
 
     def get_reference_wrench(self):
         R_T = self.R_reference.T

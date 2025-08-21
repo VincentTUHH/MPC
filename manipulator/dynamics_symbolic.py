@@ -23,12 +23,12 @@ class DynamicsSymbolic:
             self.R_reference = utils_sym.rotation_matrix_from_euler(
                 alpha_params.link_0.r, alpha_params.link_0.p, alpha_params.link_0.y
             ) # return DM, as all elements are python numerics
-            tf_vec = ca.vertcat(
+            self.tf_vec = ca.vertcat(
                 alpha_params.link_0.vec.x,
                 alpha_params.link_0.vec.y,
                 alpha_params.link_0.vec.z
             ) # 3x1 vector, returns DM, as all elements are python numerics
-            self.r_i_1_i[0] = self.R_reference.T @ tf_vec
+            self.r_i_1_i[0] = self.R_reference.T @ self.tf_vec
 
             for i in range(1, self.n_links):
                 self.r_i_1_i[i] = self.get_DH_link_offset(*[self.kinematics_.DH_table[i-1, j] for j in range(4)]) # must return DM, as self.r_i_1_i[i] is a list of casadi variables
