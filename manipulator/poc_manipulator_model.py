@@ -16,6 +16,7 @@ from common.animate import (
 import common.utils_math as utils_math
 import manipulator.kinematics as manip_kinematics
 import manipulator.kinematics_symbolic as manip_kinematics_symbolic
+import uvms.uvms as uvms
 
 # -------------------- Trajectory Generation --------------------
 
@@ -218,6 +219,23 @@ def dynamic_test(type):
     w_ref = np.zeros(3)
     dw_ref = np.zeros(3)
 
+    for _ in range(2):
+        q_val = np.array([0.8, 8.0, 0.4, 0.2])
+        dq_val = np.zeros(4)
+        ddq_val = np.zeros(4)
+        v_val = np.zeros(3)
+        a_val = np.zeros(3)
+        w_val = np.zeros(3)
+        dw_val = np.zeros(3)
+        quat_val = np.array([1.0, 0., 0., 0.0])
+        f_eef_val = np.zeros(3)
+        l_eef_val = np.zeros(3)
+
+        dyn.kinematics_.update(q_val)
+        out = dyn.rnem(q_val, dq_val, ddq_val, v_val, a_val, w_val, dw_val, quat_val, f_eef_val, l_eef_val)
+        print("out:", np.array(out).flatten())
+    return
+
     tau = []
 
     for i in range(q_traj.shape[1]):
@@ -292,6 +310,23 @@ def dynamic_symbolic_test(type):
         return rnem_func
     
     rneM_func = rnem_function_symbolic()
+
+    for _ in range(2):
+
+        q_val = np.array([0.8, 8.0, 0.4, 0.2])
+        dq_val = np.zeros(4)
+        ddq_val = np.zeros(4)
+        v_val = np.zeros(3)
+        a_val = np.zeros(3)
+        w_val = np.zeros(3)
+        dw_val = np.zeros(3)
+        quat_val = np.array([1.0, 0., 0., 0.0])
+        f_eef_val = np.zeros(3)
+        l_eef_val = np.zeros(3)
+
+        tau_c = rneM_func(q_val, dq_val, ddq_val, v_val, a_val, w_val, dw_val, quat_val, f_eef_val, l_eef_val)
+        print("tau_c:", np.array(tau_c).flatten())
+    return
 
     f_eef = np.zeros(3)
     l_eef = np.zeros(3)

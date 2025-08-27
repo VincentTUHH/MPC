@@ -6,6 +6,7 @@ import casadi as ca
 import bluerov.dynamics_symbolic as sym_brv
 import manipulator.dynamics_symbolic as sym_manip_dyn
 import manipulator.kinematics_symbolic as sym_manip_kin
+import manipulator.kinematics as manip_kin
 import threading
 from typing import Optional
 
@@ -14,445 +15,474 @@ import common.utils_math as utils_math
 import common.utils_sym as utils_sym
 import common.animate as animate
 
-# TODO: 
-# lese und extrahiere Matrix-Vektor dynamics for manipulators from Schjolbergs dissertation
-# define manipulator dynamics both in recursive Newton-Euler fashion (Trekel, (Ioi)) and in closed form Newton-Euler having Matrices (Scholberg,Fossen)
-# dafine manipulator dynamics using Articulated Body Algorithm (McMillan) -> nein, scheint kein Vorteil zu Newton-Euler zu haben, ist auch iteratives Verfahren
-
 # -----------------------
-# Globale, read-only Variablen nach init()
+# Global, read-only variables after init()
 # -----------------------
 INITIALIZED: bool = False
 _LOCK = threading.RLock()
 
-# “Header”-Variablen (Kontexte/Objekte)
+# Model/context objects
 BLUEROV_DYN = None           # bluerov.BlueROVDynamics
-MANIP_DYN  = None            # z. B. manip.ManipulatorDynamics
-MANIP_KIN  = None            # manipulator.kinematics.Kinematics
+MANIP_DYN  = None            # manipulator dynamics
+MANIP_KIN  = None            # manipulator kinematics
+MANIP_KIN_REAL = None
 
-# Symbolische/Linearisierte Funktionen (CasADi)
+# Symbolic/linearized functions (CasADi)
 TAU_COUPLING: Optional[ca.Function] = None
 DYN_FOSSEN: Optional[ca.Function] = None
-J_DYN_FOSSEN: Optional[ca.Function] = None
-INTEGRATOR_FUNC: Optional[ca.Function] = None
-J_EEF: Optional[ca.Function] = None  # Jacobian of end-effector in inertial frame
-EEF_POSE: Optional[ca.Function] = None  # Function to compute end-effector pose from eta
+J_EEF: Optional[ca.Function] = None
+EEF_POSE: Optional[ca.Function] = None
+F_SYS: Optional[ca.Function] = None
+STEP: Optional[ca.Function] = None
+ROLLOUT_UNROLLED: Optional[ca.Function] = None
 
-# Konstanten/Konfig für schnellen Zugriff
+# Constants/config for fast access
 USE_QUATERNION: bool = False
 USE_PWM: bool = True
+USE_FIXED_POINT: bool = True
+FIXED_POINT_ITER: int = 2
 V_BAT: float = 16.0
+N_HORIZON: int = 10
 INTEGRATOR: str = None
-N_DOF: int = None  # Number of degrees of freedom (DOF) in the system
-N_JOINTS: int = None  # Number of joints in the manipulator
-JOINT_LIMITS: Optional[np.ndarray] = None  # Joint limits (min, max) for each joint
-JOINT_EFFORTS: Optional[np.ndarray] = None  # Joint efforts (torques) for each joint
-JOINT_VELOCITIES: Optional[np.ndarray] = None  # Joint velocities for each joint
+N_DOF: int = None
+N_JOINTS: int = None
+STATE_DIM: int = None
+CTRL_DIM: int = None
+JOINT_LIMITS: Optional[np.ndarray] = None
+JOINT_EFFORTS: Optional[np.ndarray] = None
+JOINT_VELOCITIES: Optional[np.ndarray] = None
 
-# Optional: Konstanten aus deinem Symbolik-Modul (dürfen global sein, sind immutable)
+# Constants from symbolic modules
 L = None
 MIXER = None
 M_INV = None
 C_FUN = None
 D_FUN = None
-G_FUN = None  # wird in init gesetzt je nach USE_QUATERNION
-J_FUN = None  # dito
+G_FUN = None
+J_FUN = None
 
-Q0 = np.array([np.pi, np.pi * 0.5, np.pi * 0.75, np.pi * 0.5])
+Q0 = np.array([0.8, 8.0, 0.4, 0.2])  # Initial joint angles
 POS0 = np.array([0.0, 0.0, 0.0])
-ATT0_EULER = np.array([0.0, 0.0, np.pi/4])  # Convert Euler angles to quaternion
+ATT0_EULER = np.array([0.0, 0.0, 0.0])
 ATT0_QUAT = utils_math.euler_to_quat(ATT0_EULER[0], ATT0_EULER[1], ATT0_EULER[2])
 VEL0 = np.array([0.0, 0.0, 0.0])
 OMEGA0 = np.array([0.0, 0.0, 0.0])
 UVMS_MODEL_INSTANCE: Optional[uvms_model.UVMSModel] = None
 
+MANIP_PARAMS: Optional[dict] = None
+ALPHA_PARAMS: Optional[dict] = None
+BRV_PARAMS: Optional[dict] = None
+
 def _build_tau_coupling_func() -> ca.Function:
-    """Koppelmomente/-kräfte vom Manipulator auf das Fahrzeug (symbolisch)."""
-    q     = ca.MX.sym('q', N_JOINTS)
-    dq    = ca.MX.sym('dq', N_JOINTS)
-    ddq   = ca.MX.sym('ddq', N_JOINTS)
-    v     = ca.MX.sym('v', 3)
-    a     = ca.MX.sym('a', 3)
-    w     = ca.MX.sym('w', 3)
-    dw    = ca.MX.sym('dw', 3)
-    quat  = ca.MX.sym('quat', 4)
+    q = ca.MX.sym('q', N_JOINTS)
+    dq = ca.MX.sym('dq', N_JOINTS)
+    ddq = ca.MX.sym('ddq', N_JOINTS)
+    v_ref = ca.MX.sym('v_ref', 3)
+    a_ref = ca.MX.sym('a_ref', 3)
+    w_ref = ca.MX.sym('w_ref', 3)
+    dw_ref = ca.MX.sym('dw_ref', 3)
+    quaternion_ref = ca.MX.sym('quat_ref', 4)
     f_eef = ca.MX.sym('f_eef', 3)
     l_eef = ca.MX.sym('l_eef', 3)
 
-    tau_c = MANIP_DYN.rnem_symbolic(q, dq, ddq, v, a, w, dw, quat, f_eef, l_eef)
-    return ca.Function('tau_coupling', [q,dq,ddq,v,a,w,dw,quat,f_eef,l_eef], [tau_c])
+    kin = sym_manip_kin.KinematicsSymbolic(MANIP_PARAMS)
+    dyn = sym_manip_dyn.DynamicsSymbolic(kin, ALPHA_PARAMS)
+
+    dyn.kinematics_.update(q)
+
+    tau = dyn.rnem_symbolic(q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef)
+    return ca.Function(
+        'rnem_func',
+        [q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef],
+        [tau]
+    )
 
 def _build_dynamics_fossen_func() -> ca.Function:
-    """Fossen-Fahrzeugdynamik inkl. Kopplung als CasADi-Funktion dν = f(...)."""
     nu   = ca.MX.sym('nu', N_DOF)
     eta  = ca.MX.sym('eta', 7 if USE_QUATERNION else 6)
-    dnuC = ca.MX.sym('dnuC', N_DOF)  # Kopplungsbeschleunigungen (falls extern geschätzt/genutzt)
-    q    = ca.MX.sym('q', N_JOINTS)
-    ddq  = ca.MX.sym('ddq', N_JOINTS)
-    uq   = ca.MX.sym('uq', N_JOINTS)                 # Gelenk-Inputs (z. B. Sollgeschw.)
-    uv   = ca.MX.sym('uv', 8 if USE_PWM else 6)      # Thruster-PWM oder direkte Wrenches
-    f_eef= ca.MX.sym('f_eef', 3)                       # externe Kontaktkraft am EE
-    l_eef= ca.MX.sym('l_eef', 3)                       # Hebelarm EE
-    tau_v = (L * V_BAT * (MIXER @ uv)) if USE_PWM else uv
-
-    # !!!!!!!!!!! TAU_COUPLING funktioniert nur mit quaternion
-    tau_c = TAU_COUPLING(q, uq, ddq, nu[0:3], dnuC[0:3], nu[3:6], dnuC[3:6],
-                        eta[3:7] if USE_QUATERNION else eta[3:6], f_eef, l_eef)
-
-    dnu  = M_INV @ (tau_v + tau_c - C_FUN(nu) @ nu - D_FUN(nu) @ nu - G_FUN(eta))
-    return ca.Function('dyn_fossen', [eta,nu,dnuC,q,ddq,uv,uq,f_eef,l_eef], [dnu])
-
-def _build_Jac_dynamics_fossen() -> ca.Function:
-    dnuC = ca.MX.sym('dnuC', N_DOF)
-    eta  = ca.MX.sym('eta', 7 if USE_QUATERNION else 6)
-    nu   = ca.MX.sym('nu', N_DOF)
-    q    = ca.MX.sym('q', N_JOINTS)
-    ddq  = ca.MX.sym('ddq', N_JOINTS)
     uv   = ca.MX.sym('uv', 8 if USE_PWM else 6)
-    uq   = ca.MX.sym('uq', N_JOINTS)
-    f_eef= ca.MX.sym('f_eef', 3)
-    l_eef= ca.MX.sym('l_eef', 3)
+    tau_c = ca.MX.sym('tau_c', N_DOF)
 
-    T_val = DYN_FOSSEN(eta, nu, dnuC, q, ddq, uv, uq, f_eef, l_eef)
-    J = ca.jacobian(T_val, dnuC)              # 6x6 (or n_dof x 6)
-    return ca.Function('J_T', [eta,nu,dnuC,q,ddq,uv,uq,f_eef,l_eef], [J])
+    tau_v = (L * V_BAT * (MIXER @ uv)) if USE_PWM else uv
+    dnu  = M_INV @ (tau_v + tau_c - C_FUN(nu) @ nu - D_FUN(nu) @ nu - G_FUN(eta))
+    return ca.Function('dyn_fossen', [eta,nu,uv,tau_c], [dnu])
 
-def _build_eef_jacobian() -> ca.Function:
-    if MANIP_KIN is None:
-            raise RuntimeError("MANIP_KIN must be initialized before building CasADi functions.")
-    eta  = ca.MX.sym('eta', 7 if USE_QUATERNION else 6)
+def _build_eef_blocks() -> tuple[ca.Function, ca.Function]:
+    eta = ca.MX.sym('eta', 7 if USE_QUATERNION else 6)
+    q   = ca.MX.sym('q', N_JOINTS)
+
+    kin = sym_manip_kin.KinematicsSymbolic(MANIP_PARAMS)
+    kin.update(q)
+
+    R_I_B = utils_sym.rotation_matrix_from_quat(eta[3:]) if USE_QUATERNION \
+            else utils_sym.rotation_matrix_from_euler(eta[3], eta[4], eta[5])
+
+    r_B_0, R_B_0 = MANIP_DYN.tf_vec, MANIP_DYN.R_reference
+    r_0_eef      = kin.get_eef_position()
+    att_0_eef    = kin.get_eef_attitude()
+    J_pos, J_rot = kin.get_full_jacobian()
+
+    p_eef   = eta[0:3] + R_I_B @ r_B_0 + R_I_B @ R_B_0 @ r_0_eef
+    R_eef   = R_I_B @ R_B_0 @ utils_sym.rotation_matrix_from_quat(att_0_eef)
+    att_eef = utils_sym.rotation_matrix_to_quaternion(R_eef)
 
     J_eef = ca.MX.zeros((N_DOF, N_DOF + N_JOINTS))
+    J_eef[0:3, 0:3]      = R_I_B
+    J_eef[0:3, 3:6]      = -utils_sym.skew(R_I_B @ r_B_0 + R_I_B @ R_B_0 @ r_0_eef) @ R_I_B
+    J_eef[0:3, 6:]       = R_I_B @ R_B_0 @ J_pos
+    J_eef[3:6, 3:6]      = R_I_B
+    J_eef[3:6, 6:]       = R_I_B @ R_B_0 @ J_rot
 
-    if USE_QUATERNION:
-        R_I_B = utils_sym.rotation_matrix_from_quat(eta[3:])
-    else:
-        R_I_B = utils_sym.rotation_matrix_from_euler(eta[3], eta[4], eta[5])
+    f_pose = ca.Function('eef_pose',  [eta, q], [p_eef, att_eef])
+    f_Jeef = ca.Function('J_eef_fun', [eta, q], [J_eef])
+    return f_pose, f_Jeef
 
-    r_B_0 = MANIP_DYN.tf_vec
-    R_B_0 = MANIP_DYN.R_reference
-    r_0_eef = MANIP_KIN.get_eef_position()
-    att_0_eef = MANIP_KIN.get_eef_attitude()
+def _build_f_sys(
+    tau_coupling: ca.Function,
+    dyn_fossen: ca.Function,
+    eef_pose: ca.Function,
+    J_eef_fun: ca.Function,
+) -> ca.Function:
+    x      = ca.MX.sym('x', STATE_DIM)
+    u      = ca.MX.sym('u', CTRL_DIM)
+    ddq_in = ca.MX.sym('ddq_in', N_JOINTS)
+    dnu_g  = ca.MX.sym('dnu_guess', N_DOF)
+    f_eef  = ca.MX.sym('f_eef', 3)
+    l_eef  = ca.MX.sym('l_eef', 3)
 
-    J_manipulator_pos, J_manipulator_rot = MANIP_KIN.get_full_jacobian()
+    q   = x[0:N_JOINTS]
+    nu  = x[N_JOINTS:N_JOINTS+N_DOF]
+    eta = x[N_JOINTS+N_DOF:]
+    uq  = u[0:N_JOINTS]
+    uv  = u[N_JOINTS:]
 
-    J_eef[0:3, 0:3] = R_I_B  # R_B^I
+    quat  = eta[3:] if USE_QUATERNION else utils_sym.euler_to_quat(eta[3], eta[4], eta[5])
 
-    vec_tmp = R_I_B @ r_B_0 + R_I_B @ R_B_0 @ r_0_eef
-    skew_tmp = utils_sym.skew(vec_tmp)
-    J_eef[0:3, 3:6] = -skew_tmp @ R_I_B  # -S(r_B,ee^I) * R_B^I
-    J_eef[0:3, 6:6+N_JOINTS] = R_I_B @ R_B_0 @ J_manipulator_pos  # J_eta_ee,t^I
+    dnu_fp = dnu_g
+    if USE_FIXED_POINT:
+        for _ in range(FIXED_POINT_ITER):
+            a_ref  = dnu_fp[0:3]
+            dw_ref = dnu_fp[3:6]
+            tau_c = tau_coupling(q, uq, ddq_in, nu[0:3], a_ref, nu[3:6], dw_ref, quat, f_eef, l_eef)
+            dnu_fp = dyn_fossen(eta, nu, uv, tau_c)
 
-    J_eef[3:6, 3:6] = R_I_B  # R_B^I
-    J_eef[3:6, 6:6+N_JOINTS] = R_I_B @ R_B_0 @ J_manipulator_rot  # J_eta_ee,r^I
+    dnu_predict = dnu_fp
 
-    return ca.Function('J_eef', [eta], [J_eef])
+    dq    = uq
+    v_ref = nu[0:3]; w_ref = nu[3:6]
+    a_ref = dnu_predict[0:3]; dw_ref = dnu_predict[3:6]
 
-def _build_eef_pose_function() -> ca.Function:
-    eta  = ca.MX.sym('eta', 7 if USE_QUATERNION else 6)
+    tau_c = tau_coupling(q, dq, ddq_in, v_ref, a_ref, w_ref, dw_ref, quat, f_eef, l_eef)
+    dnu   = dyn_fossen(eta, nu, uv, tau_c)
+    deta  = J_FUN(eta) @ nu
 
-    if USE_QUATERNION:
-        R_I_B = utils_sym.rotation_matrix_from_quat(eta[3:])
-    else:
-        R_I_B = utils_sym.rotation_matrix_from_euler(eta[3], eta[4], eta[5])
+    xdot = ca.vertcat(dq, dnu, deta)
 
-    r_B_0 = MANIP_DYN.tf_vec
-    R_B_0 = MANIP_DYN.R_reference
-    r_0_eef = MANIP_KIN.get_eef_position()
-    att_0_eef = MANIP_KIN.get_eef_attitude()
+    p_eef, att_eef = eef_pose(eta, q)
+    J_eef          = J_eef_fun(eta, q)
 
-    p_eef = eta[0:3] + R_I_B @ r_B_0 + R_I_B @ R_B_0 @ r_0_eef
-    att_eef = utils_sym.rotation_matrix_to_quaternion(R_I_B @ R_B_0 @ utils_sym.rotation_matrix_from_quat(att_0_eef))
-    return ca.Function('eef_pose', [eta], [p_eef, att_eef])
+    return ca.Function('f_sys', [x, u, ddq_in, dnu_g, f_eef, l_eef],
+                       [xdot, dnu, J_eef, p_eef, att_eef])
 
+def _build_step_func(f_sys: ca.Function) -> ca.Function:
+    dt     = ca.MX.sym('dt')
+    x      = ca.MX.sym('x', STATE_DIM)
+    u      = ca.MX.sym('u', CTRL_DIM)
+    ddq_in = ca.MX.sym('ddq_in', N_JOINTS)
+    dnu_g  = ca.MX.sym('dnu_guess', N_DOF)
+    f_eef  = ca.MX.sym('f_eef', 3)
+    l_eef  = ca.MX.sym('l_eef', 3)
 
-def _build_integrator_state_update() -> ca.Function:
-    dnuC = ca.MX.sym('dnuC', N_DOF)
-    eta  = ca.MX.sym('eta', 7 if USE_QUATERNION else 6)
-    nu   = ca.MX.sym('nu', N_DOF)
-    q    = ca.MX.sym('q', N_JOINTS)
-    ddq  = ca.MX.sym('ddq', N_JOINTS)
-    uv   = ca.MX.sym('uv', 8 if USE_PWM else 6)
-    uq   = ca.MX.sym('uq', N_JOINTS)
-    f_eef= ca.MX.sym('f_eef', 3)
-    l_eef= ca.MX.sym('l_eef', 3)
-
-    dt   = ca.MX.sym('dt', 1)  # Zeitinkrement
-
-    def f(nu_f, eta_f, q_f):
-        dq = uq
-        dnu = DYN_FOSSEN(eta_f, nu_f, dnuC, q_f, ddq, uv, uq, f_eef, l_eef)
-        deta = J_FUN(eta_f) @ nu_f
-        return dq, dnu, deta
-    
-    def normalize_quat(eta):
-        pos_next = eta[0:3]
-        quat_next = eta[3:]
-        quat_next = quat_next / ca.norm_2(quat_next)
-        eta_next = ca.vertcat(pos_next, quat_next)
-        return eta_next
-
-    if INTEGRATOR == 'euler':
-        dq, dnu, deta = f(nu, eta, q)
-        q_next = q + dt * dq
-        nu_next = nu + dt * dnu
-        eta_next = eta + dt * deta
+    def normalize_quat(eta_vec):
         if USE_QUATERNION:
-            eta_next = normalize_quat(eta_next)
-        x_next = ca.vertcat(q_next, nu_next, eta_next)
-        return ca.Function('integrator_euler', [dt, nu, eta, dnuC, q, ddq, uv, uq, f_eef, l_eef], [x_next])
-                   
-    elif INTEGRATOR == 'rk4':
-        # k1
-        dq1, dnu1, deta1 = f(nu, eta, q)
-        q1 = q + 0.5 * dt * dq1
-        nu1 = nu + 0.5 * dt * dnu1
-        eta1 = eta + 0.5 * dt * deta1
+            pos = eta_vec[0:3]; q = eta_vec[3:]
+            return ca.vertcat(pos, q / ca.norm_2(q))
+        return eta_vec
 
-        # k2
-        dq2, dnu2, deta2 = f(nu1, eta1, q1)
-        q2 = q + 0.5 * dt * dq2
-        nu2 = nu + 0.5 * dt * dnu2
-        eta2 = eta + 0.5 * dt * deta2
+    if INTEGRATOR == "euler":
+        k1, dnu1, J1, P1, A1 = f_sys(x, u, ddq_in, dnu_g, f_eef, l_eef)
+        x_next = x + dt * k1
+        x_next = ca.vertcat(x_next[0:N_JOINTS + N_DOF], normalize_quat(x_next[N_JOINTS + N_DOF:]))
+        dnu = dnu1; J_eef = J1; p_eef = P1; att_eef = A1
 
-        # k3
-        dq3, dnu3, deta3 = f(nu2, eta2, q2)
-        q3 = q + dt * dq3
-        nu3 = nu + dt * dnu3
-        eta3 = eta + dt * deta3
+    elif INTEGRATOR == "rk4":
+        k1, d1, J1, P1, A1 = f_sys(x, u, ddq_in, dnu_g, f_eef, l_eef)
+        k2, d2, _,  _,  _  = f_sys(x + 0.5*dt*k1, u, ddq_in, dnu_g, f_eef, l_eef)
+        k3, d3, _,  _,  _  = f_sys(x + 0.5*dt*k2, u, ddq_in, dnu_g, f_eef, l_eef)
+        k4, d4, _,  _,  _  = f_sys(x + dt*k3,     u, ddq_in, dnu_g, f_eef, l_eef)
 
-        # k4
-        dq4, dnu4, deta4 = f(nu3, eta3, q3)
+        x_next = x + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
+        x_next = ca.vertcat(x_next[0:N_JOINTS + N_DOF], normalize_quat(x_next[N_JOINTS + N_DOF:]))
 
-        q_next = q + (dt / 6.0) * (dq1 + 2*dq2 + 2*dq3 + dq4)
-        nu_next = nu + (dt / 6.0) * (dnu1 + 2*dnu2 + 2*dnu3 + dnu4)
-        eta_next = eta + (dt / 6.0) * (deta1 + 2*deta2 + 2*deta3 + deta4)
-        if USE_QUATERNION:
-            eta_next = normalize_quat(eta_next)
-        x_next = ca.vertcat(q_next, nu_next, eta_next)
-        return ca.Function('integrator_rk4', [dt, nu, eta, dnuC, q, ddq, uv, uq, f_eef, l_eef], [x_next])
+        dnu   = (d1 + 2*d2 + 2*d3 + d4)/6.0
+        J_eef = J1; p_eef = P1; att_eef = A1
+    else:
+        raise ValueError("INTEGRATOR must be 'euler' or 'rk4'")
 
-def solve_cftoc(N, dt, opts, solver, ref_eef_positions, ref_eef_attitudes):
-    opti = ca.Opti()
-    if opts is None:
-        raise ValueError("Solver options 'opts' must be provided.")
-    if solver is None: # 'ipopt'
-        raise ValueError("Solver type 'solver' must be provided.")
-    opti.solver(solver, opts)
+    return ca.Function('step', [dt, x, u, ddq_in, dnu_g, f_eef, l_eef],
+                       [x_next, dnu, J_eef, p_eef, att_eef])
 
-    dnu_fix = 0 # oder aus dem x0 initial guess die differenz aus den ersten beiden Einträgen
+def _build_rollout_unrolled(step_fun: ca.Function, N: int) -> ca.Function:
+    x0     = ca.MX.sym('x0', STATE_DIM)
+    U      = ca.MX.sym('U',  CTRL_DIM, N)
+    Uprev0 = ca.MX.sym('Uprev0', CTRL_DIM)
+    dt     = ca.MX.sym('dt')
+    dnu0   = ca.MX.sym('dnu0', N_DOF)
+    f_eef  = ca.MX.sym('f_eef', 3)
+    l_eef  = ca.MX.sym('l_eef', 3)
 
-    state_dim = N_DOF + (7 if USE_QUATERNION else 6) + N_JOINTS
-    control_dim = N_JOINTS + (8 if USE_PWM else 6)  # 8 thrusters or 6 vehicle wrenches
+    X_list   = [x0]
+    DNU_cols = []; J_cols = []; P_cols = []; A_cols = []
 
-    # x = [q, nu, eta]
-    x = opti.variable(state_dim, N+1)  # state vector
-    # u = [u_q, tau_v] oder u = [u_q, u_esc]
-    # initialize as if for entry at 0 is k=0 and the previous entry for k=-1 is at the very last entry N+1
-    u = opti.variable(control_dim, N+1)  # control input
-
-    f_eef = ca.DM.zeros(3)
-    l_eef = ca.DM.zeros(3)
-
-    cost = 0.0
-    Q_pos = ca.DM.eye(3) * 1.0  # Position tracking cost
-    Q_att = ca.DM.eye(3) * 1.0   # Attitude tracking cost
-    R_input = ca.DM.eye(control_dim) * 0.1  # Control input cost
+    xk     = x0
+    u_prev = Uprev0
+    dnu_g  = dnu0
 
     for k in range(N):
-        q_k = x[0:N_JOINTS, k]  # joint angles
-        nu_k = x[N_JOINTS:N_JOINTS+N_DOF, k] # body velocities
-        eta_k = x[N_JOINTS+N_DOF:, k] # position and attitude
-        uq_k = u[0:N_JOINTS, k]
-        uv_k = u[N_JOINTS:, k]  # vehicle wrenches or ESC commands
+        uk     = U[:, k]
+        ddq_k  = (uk[0:N_JOINTS] - u_prev[0:N_JOINTS]) / dt
+        xk1, dnu_k, Jk, Pk, Ak = step_fun(dt, xk, uk, ddq_k, dnu_g, f_eef, l_eef)
 
-        MANIP_DYN.kinematics_.update(q_k)  # Update kinematics with current joint angles
+        X_list.append(xk1)
+        DNU_cols.append(dnu_k); J_cols.append(Jk); P_cols.append(Pk); A_cols.append(Ak)
+        xk = xk1; u_prev = uk; dnu_g = dnu_k
 
-        # Joint acceleration
-        ddq_k = (u[0:N_JOINTS, k] - u[0:N_JOINTS, k-1]) / dt
+    X_all   = ca.hcat(X_list)
+    DNU_all = ca.hcat(DNU_cols)
+    J_all   = ca.hcat(J_cols)
+    P_all   = ca.hcat(P_cols)
+    A_all   = ca.hcat(A_cols)
 
-        # Fixed-Point Iteration: implicit solving dnu_k for tau_coupling evaluation in dynamic equations
-        for _ in range(2):
-            dnu_fix = DYN_FOSSEN(eta_k,nu_k,dnu_fix,q_k,ddq_k,uv_k,uq_k,f_eef,l_eef)
+    return ca.Function('rollout_unrolled',
+        [x0, U, Uprev0, dt, dnu0, f_eef, l_eef],
+        [X_all, DNU_all, J_all, P_all, A_all]
+    )
 
-        # Update next state x
-        opti.subject_to(x[:, k+1] == INTEGRATOR_FUNC(dt, nu_k, eta_k, dnu_fix, q_k, ddq_k, uv_k, uq_k, f_eef, l_eef))
+def solve_cftoc(
+        dt: float,
+        opts: dict,
+        solver: str,
+        x0_val: np.ndarray,
+        f_eef_val: np.ndarray,
+        l_eef_val: np.ndarray,
+        U_guess: np.ndarray,
+        X_guess: np.ndarray,
+        ref_eef_positions: np.ndarray,
+        ref_eef_attitudes: np.ndarray,
+        u_prev0_val: Optional[np.ndarray] = None,
+        dnu0_val: Optional[np.ndarray] = None,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+    assert ref_eef_positions.shape == (3, N_HORIZON)
+    assert ref_eef_attitudes.shape == (4, N_HORIZON)
 
-        # Control input constraints
+    opti = ca.Opti()
+    opti.solver(solver, {"expand": True}, opts)
+
+    X = opti.variable(STATE_DIM, N_HORIZON+1)
+    U = opti.variable(CTRL_DIM, N_HORIZON)
+
+    x0p    = opti.parameter(STATE_DIM); opti.set_value(x0p, x0_val)
+    Uprev0 = opti.parameter(CTRL_DIM);  opti.set_value(Uprev0, u_prev0_val)
+    dnu0   = opti.parameter(N_DOF);     opti.set_value(dnu0, dnu0_val)
+
+    f_eef = f_eef_val
+    l_eef = l_eef_val
+
+    opti.subject_to(X[:, 0] == x0p)
+    opti.set_initial(U, U_guess)
+    opti.set_initial(X, X_guess)
+
+    Qp = ca.DM.eye(3)
+    Qa = ca.DM.eye(3)
+    Qvehicle_pos = ca.DM.eye(3) * 100
+    Qvel = ca.DM.eye(N_DOF) * 1.0 
+    Ru = ca.DM.eye(CTRL_DIM) * 1e-4
+    Rdu = ca.DM.eye(CTRL_DIM) * 1e-3
+
+    u_prev = Uprev0
+    dnu_g  = dnu0
+
+    cost = 0
+    for k in range(N_HORIZON):
+        xk = X[:, k]
+        uk = U[:, k]
+        ddq_k = (uk[0:N_JOINTS] - u_prev[0:N_JOINTS]) / dt
+        xkp1, dnu_k, Jk, Pk, Ak = STEP(dt, xk, uk, ddq_k, dnu_g, f_eef, l_eef)
+        opti.subject_to(X[:, k+1] == xkp1)
+
+        vehicle_pos_k = X[N_JOINTS+N_DOF:N_JOINTS+N_DOF+3, k]
+        vehicle_error = ca.DM(np.array([1.0, 0, 0])) - vehicle_pos_k
+        cost += vehicle_error.T @ Qvehicle_pos @ vehicle_error
+
+
+
+        # pos_err = ref_eef_positions[:, k] - Pk
+        # att_err = utils_sym.quaternion_error(ref_eef_attitudes[:, k], Ak)
+        # cost += pos_err.T @ Qp @ pos_err + att_err.T @ Qa @ att_err
+        nu_k = X[N_JOINTS : N_JOINTS+N_DOF, k]
+        cost += nu_k.T @ Qvel @ nu_k
+
+        cost += uk.T @ Ru @ uk
+        cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
+
         if USE_PWM:
-            opti.subject_to(u[N_JOINTS:, k] >= -1.0)
-            opti.subject_to(u[N_JOINTS:, k] <= 1.0)
-        else:
-            opti.subject_to(u[N_JOINTS:, k] >= -1.0)
-            opti.subject_to(u[N_JOINTS:, k] <= 1.0)
+            opti.subject_to(U[N_JOINTS:, k] <=  1.0)
+            opti.subject_to(U[N_JOINTS:, k] >= -1.0)
 
-        eef_pos_k, eef_att_k = EEF_POSE(eta_k)  # global end-effector pose
-        J_eef = J_EEF(eta_k)  # relates generalized velocities (nu_k and dq_k = uq_k) to end-effector velocities
-        J_eef_pinv = ca.pinv(J_eef)
-        # e.g.: zeta_desired = J_eef_pinv @ eef_velocity_desired
+        # Joint position limits constraints
 
-        pos_error = ref_eef_positions[:,k] - eef_pos_k
-        att_error = utils_sym.quaternion_error(ref_eef_attitudes[:,k], eef_att_k)  # quaternion error
+        opti.subject_to(U[0:N_JOINTS, k] <= JOINT_VELOCITIES)
+        opti.subject_to(U[0:N_JOINTS, k] >= JOINT_VELOCITIES * -1)
 
-        cost += ca.mtimes(pos_error.T, Q_pos @ pos_error)
-        cost += ca.mtimes(att_error.T, Q_att @ att_error)  # Position tracking cost
+        # Joint velocity limits constraints
+        opti.subject_to(X[:N_JOINTS, k] <= JOINT_LIMITS[1, :])
+        opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :])
 
-        # TODO: Add constraints and eef trajectory tracking using the manipulator Jacobian (make also a ca.Function for that)
+        u_prev = uk
+        dnu_g  = dnu_k
 
-    opti.minimize(cost) 
-
+    opti.minimize(cost)
+    
     try:
         sol = opti.solve()
-        return sol.value(x), sol.value(u), sol.value(cost), sol.value(opti.lam_g)
+        X_opt = sol.value(X)
+        U_opt = sol.value(U)
+        J_opt = float(sol.value(cost))
+        return X_opt, U_opt, J_opt
     except RuntimeError:
         print("Infeasible. Debug info:")
-        print("x0:", opti.debug.value(x[:, 0]))
-        print("u0:", opti.debug.value(u[:, 0]))
-        return np.zeros((x.shape[0], N+1)), np.zeros((u.shape[0], N)), 1e6
+        print("x0:", opti.debug.value(X[:, 0]))
+        print("u0:", opti.debug.value(U[:, 0]))
+        return np.zeros((X.shape[0], N_HORIZON+1)), np.zeros((U.shape[0], N_HORIZON)), 1e6
     
-def test_symbolic_uvms_model():
-    global Q0, POS0, ATT0_QUAT, VEL0, OMEGA0, N_DOF, N_JOINTS, USE_QUATERNION, USE_PWM, V_BAT, INTEGRATOR
+# def task_eef_tracking():
+#     pass
 
-    uv = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # Example control input
-    uq = np.array([0.0, 0.0, 0.0, 0.0])  # Example joint velocities
-    dt = 0.05
-    t_range = 2
+# def task_station_keeping():
+#     pass
 
-    f_eef = np.array([0.0, 0.0, 0.0])  # External force at end-effector
-    l_eef = np.array([0.0, 0.0, 0.0])  # External torque at end-effector
+def run_mpc(
+    *,
+    M: int,
+    dt: float,
+    x0: np.ndarray,
+    ref_eef_positions: np.ndarray,
+    ref_eef_attitudes: np.ndarray,
+    opts: dict,
+    solver: str = "ipopt",
+    u_prev0: Optional[np.ndarray] = None,
+    dnu0: Optional[np.ndarray] = None,
+    f_eef_val: Optional[np.ndarray] = None,
+    l_eef_val: Optional[np.ndarray] = None,
+):
+    assert x0.shape[0] == STATE_DIM
+    assert ref_eef_positions.shape == (3, M)
+    assert ref_eef_attitudes.shape == (4, M)
 
-    dnu_last = np.zeros(6)  # Initial guess for dnu
-    last_uq = np.zeros(4)  # Initial guess for joint velocities
+    if u_prev0 is None: # variable necessary to compute ddq
+        u_prev0 = np.zeros(CTRL_DIM)
+    if dnu0 is None:
+        dnu0 = np.zeros(N_DOF)
+    if f_eef_val is None:
+        f_eef_val = np.zeros(3)
+    if l_eef_val is None:
+        l_eef_val = np.zeros(3)
 
-    x_next = np.zeros(N_JOINTS + N_DOF + (7 if USE_QUATERNION else 6))  # State vector for next step
-    x = np.zeros(N_JOINTS + N_DOF + (7 if USE_QUATERNION else 6))  # Initial state vector
-    x[:N_JOINTS] = Q0  # Set initial joint angles
-    x[N_JOINTS:N_JOINTS+N_DOF] = np.concatenate((VEL0, OMEGA0))  # Set initial velocities
-    x[N_JOINTS+N_DOF:] = np.concatenate((POS0, ATT0_QUAT))  # Set initial position and attitude
+    X_real = np.zeros((STATE_DIM, M+1))
+    U_appl = np.zeros((CTRL_DIM, M))
+    J_hist = np.zeros(M)
+    X_pred = np.zeros((STATE_DIM, N_HORIZON+1, M))
+    U_pred = np.zeros((CTRL_DIM, N_HORIZON, M))
 
-    joint_positions = np.zeros((N_JOINTS + 2, 3))  # Joint positions including base
+    # for initializing the optimization variables / the warm start
+    U_guess = np.tile(u_prev0.reshape(-1, 1), (1, N_HORIZON))
+    X_guess = np.tile(x0.reshape(-1, 1), (1, N_HORIZON+1))
 
-    R_B_0 = np.array(MANIP_DYN.R_reference)
-    r_B_0 = np.array(MANIP_DYN.tf_vec)
+    X_real[:, 0] = x0
 
-    MANIP_DYN.kinematics_.update(x[:N_JOINTS])  # Update kinematics with current joint angles
+    # TODO when using EKF2 later, use current estimate for accelerations in dnu0, instead of zero array
 
-    eta_history = []
+    # Ensure reference arrays always have N_HORIZON columns for each MPC step
+    # Pad reference arrays so that slicing [:, step:step+N_HORIZON] is always valid
+    if ref_eef_positions.shape[1] < M + N_HORIZON:
+        pad_count = M + N_HORIZON - ref_eef_positions.shape[1]
+        ref_eef_positions = np.hstack([ref_eef_positions, np.tile(ref_eef_positions[:, -1][:, None], (1, pad_count))])
+        ref_eef_attitudes = np.hstack([ref_eef_attitudes, np.tile(ref_eef_attitudes[:, -1][:, None], (1, pad_count))])
 
-    joint_history = []  # Store joint positions over time
+    for step in range(M):
+        print(f"Step {step + 1} / {M}")
+        X_opt, U_opt, J_opt = solve_cftoc(
+            dt=dt,
+            opts=opts,
+            solver=solver,
+            x0_val=X_real[:, step],
+            f_eef_val=f_eef_val,
+            l_eef_val=l_eef_val,
+            U_guess=U_guess,
+            X_guess=X_guess,
+            ref_eef_positions=ref_eef_positions[:, step:step+N_HORIZON],
+            ref_eef_attitudes=ref_eef_attitudes[:, step:step+N_HORIZON],
+            u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1],
+            dnu0_val=dnu0
+        )
 
-    for _ in range(t_range):
-        ddq = (uq - last_uq) /dt
-        last_uq = uq
+        X_pred[:, :, step] = X_opt
+        U_pred[:, :, step] = U_opt
+        J_hist[step] = J_opt
 
-        x_next = np.array(INTEGRATOR_FUNC(dt, x[N_JOINTS:N_JOINTS+N_DOF], x[N_JOINTS+N_DOF:], dnu_last, x[:N_JOINTS], ddq, uv, uq, f_eef, l_eef))
-        eta_next = x_next[N_JOINTS+N_DOF:]  # Extract eta from the state vector
-        dnu_last = np.array(DYN_FOSSEN(x[N_JOINTS+N_DOF:], x[N_JOINTS:N_JOINTS+N_DOF], dnu_last, x[:N_JOINTS], ddq, uv, uq, f_eef, l_eef))
-        x = x_next
+        u_apply = U_opt[:, 0]
+        U_appl[:, step] = u_apply
+        uq_apply = u_apply[0:N_JOINTS]
+        uv_apply = u_apply[N_JOINTS:]
 
-        MANIP_DYN.kinematics_.update(x[:N_JOINTS])  # Update kinematics with current joint angles
-         
-        R_I_B = utils_math.rotation_matrix_from_quat(eta_next[3:])
-
-        joint_positions[0] = np.array(eta_next[0:3] + R_I_B @ r_B_0).flatten() # joint 0
-    
-        for i in range(N_JOINTS + 1):
-            pos_expr = MANIP_KIN.get_link_position(i)                 # MX
-            pos_val  = ca.Function('f', [], [pos_expr])()
-            pos_val_np = np.array(pos_val['o0']).flatten()
-            joint_positions[i+1] = joint_positions[0] + np.array(R_I_B @ R_B_0 @ pos_val_np).flatten()
-
-        etaaa = np.concatenate((eta_next[0:3].flatten(), utils_math.quat_to_euler(eta_next[3:].flatten())))
-        eta_history.append(etaaa.reshape(1, -1))  # Ensure eta is row-wise
-        joint_history.append(joint_positions.copy())
-
-    eta_history = np.vstack(eta_history)  # Stack rows for eta_history
-
-    eta_history = np.array(eta_history)
-    joint_history = np.array(joint_history)
-
-    animate.animate_uvms(eta_history, joint_history, dt)
-
-    #### ---------------------------------------------------------------
-
-    eta_history_real = []
-
-    joint_history_real = []
-
-    for _ in range(t_range):
-        UVMS_MODEL_INSTANCE.update(dt, uq, uv, USE_PWM, V_BAT) 
-        eta, joint_positions = UVMS_MODEL_INSTANCE.get_uvms_configuration()
-
-        eta_history_real.append(eta.reshape(1, -1))  # Ensure eta is row-wise
-        joint_history_real.append(joint_positions.copy())
-
-    eta_history_real = np.vstack(eta_history_real)  # Stack rows for eta_history
-
-    eta_history_real = np.array(eta_history_real)
-    joint_history_real = np.array(joint_history_real)
-
-    animate.animate_uvms(eta_history_real, joint_history_real, dt)
-
-    ### --------------------------------------------------------------------
-    import matplotlib.pyplot as plt
-
-    # Plot end-effector (last joint) global position over time
-    fig, ax = plt.subplots(2, 1, figsize=(10, 8))
-
-    # End-effector position from symbolic simulation
-    ee_pos = joint_history[:, -1, :]  # shape: (timesteps, 3)
-    ax[0].plot(ee_pos[:, 0], label='EE x (symbolic)')
-    ax[0].plot(ee_pos[:, 1], label='EE y (symbolic)')
-    ax[0].plot(ee_pos[:, 2], label='EE z (symbolic)')
-
-    # End-effector position from real model
-    ee_pos_real = joint_history_real[:, -1, :]
-    ax[0].plot(ee_pos_real[:, 0], '--', label='EE x (real)')
-    ax[0].plot(ee_pos_real[:, 1], '--', label='EE y (real)')
-    ax[0].plot(ee_pos_real[:, 2], '--', label='EE z (real)')
-
-    ax[0].set_title('End-Effector Global Position Over Time')
-    ax[0].set_xlabel('Time step')
-    ax[0].set_ylabel('Position [m]')
-    ax[0].legend()
-    ax[0].grid()
-
-    # Plot vehicle position (eta[0:3]) over time
-    veh_pos = eta_history[:, 0:3]
-    veh_pos_real = eta_history_real[:, 0:3]
-
-    ax[1].plot(veh_pos[:, 0], label='Vehicle x (symbolic)')
-    ax[1].plot(veh_pos[:, 1], label='Vehicle y (symbolic)')
-    ax[1].plot(veh_pos[:, 2], label='Vehicle z (symbolic)')
-
-    ax[1].plot(veh_pos_real[:, 0], '--', label='Vehicle x (real)')
-    ax[1].plot(veh_pos_real[:, 1], '--', label='Vehicle y (real)')
-    ax[1].plot(veh_pos_real[:, 2], '--', label='Vehicle z (real)')
-
-    ax[1].set_title('Vehicle Position Over Time')
-    ax[1].set_xlabel('Time step')
-    ax[1].set_ylabel('Position [m]')
-    ax[1].legend()
-    ax[1].grid()
-
-    plt.tight_layout()
-    plt.show()
-
-    
+        # apply optimal control to system
+        # UVMS_MODEL_INSTANCE.update(dt, uq_apply, uv_apply, USE_PWM, V_BAT) 
+        # X_real[:, step+1] = UVMS_MODEL_INSTANCE.get_next_state(USE_QUATERNION)
+        #####
+        xk = X_real[:, step]
+        uk = U_appl[:, step]
+        u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1]
+        ddq_k = (uk[0:N_JOINTS] - u_prev0_val[0:N_JOINTS]) / dt
+        xkp1, _, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu0, f_eef_val, l_eef_val)
+        X_real[:, step+1] = xkp1.full().flatten()
+        #################################
 
 
-        
+        U_guess = np.hstack([U_opt[:, 1:], U_opt[:, -1][:, None]])
+        X_guess = np.hstack([X_opt[:, 1:], X_opt[:, -1][:, None]])
+        X_guess[:, 0] = X_real[:, step+1]
 
+    return X_real, U_appl, J_hist, X_pred, U_pred
 
+def check_fixed_point(q, nu, eta, uq, uv, ddq_in, dnu_g, quat, f_eef, l_eef):
+    dnu_fp = dnu_g
+    dnu_history = []
+    converged_iter = None
+    threshold = 0.1
+    dnu_fp_converged = None
 
+    for k in range(FIXED_POINT_ITER):
+        a_ref, dw_ref = dnu_fp[0:3], dnu_fp[3:6]
+        tau_c = TAU_COUPLING(q, uq, ddq_in, nu[0:3], a_ref, nu[3:6], dw_ref, quat, f_eef, l_eef)
+        dnu_fp_new = DYN_FOSSEN(eta, nu, uv, tau_c)
+        dnu_history.append(np.array(dnu_fp_new).flatten())
+        if converged_iter is None and np.allclose(np.array(dnu_fp_new), np.array(dnu_fp)):
+            converged_iter = k + 1
+            dnu_fp_converged = np.array(dnu_fp_new).flatten()
+        dnu_fp = dnu_fp_new
 
+    if converged_iter is not None:
+        print(f"Converged after {converged_iter} iterations.")
+        mean_errors = [np.linalg.norm(dnu - dnu_fp_converged) for dnu in dnu_history]
+        for i, err in enumerate(mean_errors):
+            if err < threshold:
+                print(f"First mean error below threshold ({threshold}) at iteration {i+1}: {err}")
+                break
+    else:
+        print("Did not converge.")
+        mean_errors = None
 
-    # uvms_model_instance.update(dt, uq, uv, use_pwm, V_bat) 
-    # eta, joint_positions = uvms_model_instance.get_uvms_configuration()
-
-
-
-
+    return dnu_fp, dnu_history, mean_errors
 
 def init_uvms_model(
     bluerov_params_path: str = 'model_params.yaml',
@@ -462,40 +492,39 @@ def init_uvms_model(
     integrator: str = 'euler',
     use_quaternion: bool = True,
     use_pwm: bool = True,
-    v_bat: float = 16.0
+    use_fixed_point: bool = True,
+    v_bat: float = 16.0,
+    fixed_point_iter: int = 2,
+    n_horizon: int = 10
 ) -> None:
-    """Einmalige Initialisierung. Idempotent: mehrfacher Aufruf macht nichts."""
-    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_DYN_FOSSEN, INTEGRATOR_FUNC, J_EEF, EEF_POSE
-    global USE_QUATERNION, USE_PWM, V_BAT, L, MIXER, M_INV, JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, INTEGRATOR, N_DOF, N_JOINTS, C_FUN, D_FUN, G_FUN, J_FUN
-
-    global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE
+    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED
+    global USE_QUATERNION, USE_PWM, USE_FIXED_POINT, FIXED_POINT_ITER, N_HORIZON, V_BAT, L, MIXER, M_INV, JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, INTEGRATOR, N_DOF, N_JOINTS, STATE_DIM, CTRL_DIM, C_FUN, D_FUN, G_FUN, J_FUN
+    global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, MANIP_KIN_REAL
+    global MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS
 
     with _LOCK:
         if INITIALIZED:
             return
 
-        # Konfig setzen
         INTEGRATOR = integrator.lower()
         USE_QUATERNION = use_quaternion
         USE_PWM = use_pwm
+        USE_FIXED_POINT = use_fixed_point
         V_BAT = v_bat
+        FIXED_POINT_ITER = fixed_point_iter
+        N_HORIZON = n_horizon
 
-        # Modelle laden/bauen
-        brv_params = utils_math.load_model_params(bluerov_params_path)
-        BLUEROV_DYN = sym_brv.BlueROVDynamicsSymbolic(brv_params)
+        BRV_PARAMS = utils_math.load_model_params(bluerov_params_path)
+        BLUEROV_DYN = sym_brv.BlueROVDynamicsSymbolic(BRV_PARAMS)
 
-        manip_params = utils_math.load_dh_params(dh_params_path)
-        # Falls du Limits brauchst:
+        MANIP_PARAMS = utils_math.load_dh_params(dh_params_path)
         if joint_limits_path:
             JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, _ = utils_math.load_joint_limits(joint_limits_path)
-            # 5 entries each for 4 joints + end effector
-            # JOINT_LIMITS: tupels (min, max) for each joint
-            # JOINT_EFFORTS: max torques for each joint
-            # JOINT_VELOCITIES: max velocities for each joint
-        alpha_params = utils_math.load_dynamic_params(manipulator_dyn_params_paths)
-        # Dein konkreter Dyn-Builder (Passe an deine API an):
-        MANIP_KIN = sym_manip_kin.KinematicsSymbolic(manip_params)
-        MANIP_DYN = sym_manip_dyn.DynamicsSymbolic(MANIP_KIN, alpha_params)
+            JOINT_LIMITS = np.array(JOINT_LIMITS).T
+        ALPHA_PARAMS = utils_math.load_dynamic_params(manipulator_dyn_params_paths)
+        MANIP_KIN = sym_manip_kin.KinematicsSymbolic(MANIP_PARAMS)
+        MANIP_DYN = sym_manip_dyn.DynamicsSymbolic(MANIP_KIN, ALPHA_PARAMS)
+        MANIP_KIN_REAL = manip_kin.Kinematics(MANIP_PARAMS)
 
         C_FUN = BLUEROV_DYN.C
         D_FUN = BLUEROV_DYN.D
@@ -509,26 +538,25 @@ def init_uvms_model(
         N_JOINTS = MANIP_DYN.kinematics_.n_joints
         N_DOF = BLUEROV_DYN.M_inv.size1() 
 
-        # CasADi-Funktionen bauen
+        STATE_DIM = N_DOF + (7 if USE_QUATERNION else 6) + N_JOINTS
+        CTRL_DIM = N_JOINTS + (8 if USE_PWM else 6)
+
         TAU_COUPLING = _build_tau_coupling_func()
         DYN_FOSSEN = _build_dynamics_fossen_func()
-        J_DYN_FOSSEN = _build_Jac_dynamics_fossen()
-        INTEGRATOR_FUNC = _build_integrator_state_update()
-        J_EEF = _build_eef_jacobian()
-        EEF_POSE = _build_eef_pose_function()
+        EEF_POSE, J_EEF = _build_eef_blocks()
+        F_SYS = _build_f_sys(TAU_COUPLING, DYN_FOSSEN, EEF_POSE, J_EEF)
+        STEP = _build_step_func(F_SYS)
+        ROLLOUT_UNROLLED = _build_rollout_unrolled(STEP, N_HORIZON)
 
         INITIALIZED = True
 
-        UVMS_MODEL_INSTANCE = uvms_model.UVMSModel(manip_params, alpha_params, brv_params, Q0, POS0, ATT0_EULER, VEL0, OMEGA0)
+        UVMS_MODEL_INSTANCE = uvms_model.UVMSModel(MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS, Q0, POS0, ATT0_EULER, VEL0, OMEGA0)
 
 def is_initialized() -> bool:
     return INITIALIZED
 
-
 def teardown_for_tests() -> None:
-    """Nur für Tests: globale Referenzen löschen (vorsichtig verwenden)."""
-    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, TAU_COUPLING, DYN_FOSSEN, J_DYN_FOSSEN, INTEGRATOR_FUNC
-    global USE_QUATERNION, USE_PWM, V_BAT, INTEGRATOR, N_DOF, N_JOINTS, G_FUN, J_FUN
+    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, TAU_COUPLING, DYN_FOSSEN, G_FUN, J_FUN
     with _LOCK:
         INITIALIZED = False
         BLUEROV_DYN = None
@@ -537,8 +565,6 @@ def teardown_for_tests() -> None:
         DYN_FOSSEN = None
         G_FUN = None
         J_FUN = None
-        INTEGRATOR_FUNC = None
-        # Konstanten L/MIXER/M_INV/C_FUN/D_FUN bleiben als Modulkonstanten bestehen
 
 def main():
     bluerov_package_path = get_package_path('bluerov')
@@ -563,9 +589,141 @@ def main():
         manipulator_dyn_params_paths=manipulator_dyn_params_paths,
         use_quaternion=True,
         use_pwm=True,
-        v_bat=16.0
+        use_fixed_point=False,
+        v_bat=16.0,
+        fixed_point_iter=2,
+        n_horizon=10
     )
-    test_symbolic_uvms_model()
+    return
+
+    T_duration = 10.0 # [s]
+    dt = 0.05 # sampling [s]
+    M = int(T_duration / dt)  # number of MPC steps / control horizon
+    x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
+    ref_eef_pos = np.zeros((3, M))
+    ref_eef_att = np.zeros((4, M))
+    # opts = {'ipopt.print_level': 0, 'print_time': 0}
+    opts = {'ipopt.print_level': 5, 'print_time': 1}
+    opts = {"print_time": 0,
+        "ipopt.print_level": 0,
+        "ipopt.sb": "yes",
+        "ipopt.linear_solver": "mumps",           # or ma57 if available
+        "ipopt.hessian_approximation": "limited-memory"  # great for large graphs
+    }
+    solver = "ipopt"
+    u_prev0 = np.full((CTRL_DIM), 0.1)  # initial control input guess
+    dnu0 = None # replace later with EKF2 prediction of accelerations
+    f_eef_val = np.zeros(3)
+    l_eef_val = np.zeros(3)
+
+    X_real, U_appl, J_hist, X_pred, U_pred = run_mpc(M=M,
+            dt=dt,
+            x0=x0,
+            ref_eef_positions=ref_eef_pos,
+            ref_eef_attitudes=ref_eef_att,
+            opts=opts,
+            solver=solver,
+            u_prev0=u_prev0,
+            dnu0=dnu0,
+            f_eef_val=f_eef_val,
+            l_eef_val=l_eef_val
+            )
+    
+    import matplotlib.pyplot as plt
+
+    # Extract vehicle position history from X_real
+    eta_start = N_JOINTS + N_DOF
+    vehicle_pos_indices = slice(eta_start, eta_start + 3)
+    vehicle_pos_history = X_real[vehicle_pos_indices, :]  # shape: (3, M+1)
+
+    time = np.arange(vehicle_pos_history.shape[1]) * dt
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(time, vehicle_pos_history[0, :], label='x')
+    plt.plot(time, vehicle_pos_history[1, :], label='y')
+    plt.plot(time, vehicle_pos_history[2, :], label='z')
+    plt.xlabel('Time [s]')
+    plt.ylabel('Vehicle Position [m]')
+    plt.title('Vehicle x, y, z Position Over Time')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    # Plot joint efforts over time
+    plt.figure(figsize=(10, 6))
+    for i in range(N_JOINTS):
+        plt.plot(time[:-1], U_appl[i, :], label=f'Joint {i+1}')
+    plt.xlabel('Time [s]')
+    plt.ylabel('Joint Effort')
+    plt.title('Joint Effort Over Time')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    # Plot vehicle thruster commands over time
+    plt.figure(figsize=(10, 6))
+    thruster_start = N_JOINTS
+    thruster_end = U_appl.shape[0]
+    for i in range(thruster_start, thruster_end):
+        plt.plot(time[:-1], U_appl[i, :], label=f'Thruster {i - thruster_start + 1}')
+    plt.xlabel('Time [s]')
+    plt.ylabel('Thruster Command')
+    plt.title('Vehicle Thruster Commands Over Time')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    # Use the first predicted trajectory (X_pred[..., 0]) instead of X_real
+    vehicle_pos_pred = X_pred[vehicle_pos_indices, :, 0]  # shape: (3, N_HORIZON+1)
+    time_pred = np.arange(vehicle_pos_pred.shape[1]) * dt
+
+    # print("Predicted vehicle positions (first MPC step):")
+    # print(vehicle_pos_pred)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(time_pred, vehicle_pos_pred[0, :], label='x (pred)')
+    plt.plot(time_pred, vehicle_pos_pred[1, :], label='y (pred)')
+    plt.plot(time_pred, vehicle_pos_pred[2, :], label='z (pred)')
+    plt.xlabel('Time [s]')
+    plt.ylabel('Vehicle Position [m]')
+    plt.title('Predicted Vehicle x, y, z Position (First MPC Step)')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    vehicle_pos_pred = X_pred[vehicle_pos_indices, :, 5]  # shape: (3, N_HORIZON+1)
+    time_pred = np.arange(vehicle_pos_pred.shape[1]) * dt
+
+    # print(vehicle_pos_pred)
+    # print("Next")
+    # print(X_pred)
+
+    # print("Predicted vehicle positions (first MPC step):")
+    # print(vehicle_pos_pred)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(time_pred, vehicle_pos_pred[0, :], label='x (pred)')
+    plt.plot(time_pred, vehicle_pos_pred[1, :], label='y (pred)')
+    plt.plot(time_pred, vehicle_pos_pred[2, :], label='z (pred)')
+    plt.xlabel('Time [s]')
+    plt.ylabel('Vehicle Position [m]')
+    plt.title('Predicted Vehicle x, y, z Position (First MPC Step)')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+    
+    # # Extract eta_history and joint_history from X_real
+    # # X_real shape: (STATE_DIM, M+1)
+    # # eta is at indices: N_JOINTS + N_DOF : N_JOINTS + N_DOF + (7 if USE_QUATERNION else 6)
+    # eta_start = N_JOINTS + N_DOF
+    # eta_end = eta_start + (7 if USE_QUATERNION else 6)
+    # eta_history = X_real[eta_start:eta_end, :]
+
+    # # joint_history is first N_JOINTS
+    # joint_history = X_real[0:N_JOINTS, :]
+
+    # # Animate the UVMS
+    # animate.animate_uvms(eta_history, joint_history, dt)
     return
 
 if __name__ == "__main__":

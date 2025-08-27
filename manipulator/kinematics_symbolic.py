@@ -66,3 +66,20 @@ class KinematicsSymbolic:
         self.update(q_sym)
         eef_pose = ca.vertcat(self.get_eef_position(), self.get_eef_attitude())
         return ca.Function('eef_pose', [q_sym], [eef_pose])
+
+    # Helper function for pure symbolic evaluation without external update() dependencies
+    def get_eef_position_symbolic(self, q: ca.MX) -> ca.MX:
+        self.update(q)
+        return self.get_eef_position()
+    
+    def get_eef_attitude_symbolic(self, q: ca.MX) -> ca.MX:
+        self.update(q)
+        return self.get_eef_attitude()
+
+    def get_link_positions_symbolic(self, q: ca.MX) -> list[ca.MX]:
+        self.update(q)
+        return [self.get_link_position(i) for i in range(self.n_joints + 1)]
+
+    def get_full_jacobian_symbolic(self, q: ca.MX) -> tuple[ca.MX, ca.MX]:
+        self.update(q)
+        return self.get_full_jacobian()

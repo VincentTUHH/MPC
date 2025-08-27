@@ -41,15 +41,32 @@ class UVMSModel:
 
         self.f_eef = np.zeros(3)  # End-effector force in end-effector frame
         self.l_eef = np.zeros(3)  # End-effector torque in end-effector frame
+        # print(f"real - eta    : {self.eta}")
+        # print(f"real - nu    : {self.nu.flatten()}")
+
 
 
     def update(self, dt, uq, uv, use_pwm, V_bat):
+        self.manipulator_dynamics.kinematics_.update(self.q)
         ddq = (uq - self.last_uq) / dt
         self.last_uq = uq
 
-        tau_coupling = self.manipulator_dynamics.rnem_euler(self.q, uq, ddq, self.nu[:3], self.last_dnu[:3], 
-                                                     self.nu[3:], self.last_dnu[:3], self.eta[3:], 
+        att = utils_math.euler_to_quat(self.eta[3], self.eta[4], self.eta[5])
+        tau_coupling = self.manipulator_dynamics.rnem(self.q, uq, ddq, self.nu[:3], self.last_dnu[:3], 
+                                                     self.nu[3:], self.last_dnu[3:], att, 
                                                      self.f_eef, self.l_eef)
+        # print("tau_coupling:", tau_coupling)
+        # print("rnem inputs:")
+        # print("  q:", self.q)
+        # print("  uq:", uq)
+        # print("  ddq:", ddq)
+        # print("  nu[:3] (lin_vel):", self.nu[:3])
+        # print("  last_dnu[:3] (lin_acc):", self.last_dnu[:3])
+        # print("  nu[3:] (ang_vel):", self.nu[3:])
+        # print("  last_dnu[3:] (ang_acc):", self.last_dnu[3:])
+        # print("  att (quat):", att)
+        # print("  f_eef:", self.f_eef)
+        # print("  l_eef:", self.l_eef)
         
         if use_pwm:
             tau_vehicle = self.bluerov_dynamics.mixer @ uv * self.bluerov_dynamics.L * V_bat  # convert ESC signals to thrusts
@@ -65,7 +82,7 @@ class UVMSModel:
         self.nu = self.nu + dt * self.last_dnu
         
         self.q = self.q + dt * uq
-        self.manipulator_kinematics.update(self.q)
+        
         
 
         # self.r_0_eef = self.manipulator_kinematics.get_eef_position()
@@ -75,9 +92,27 @@ class UVMSModel:
         R_I_B = utils_math.rotation_matrix_from_euler(self.eta[3], self.eta[4], self.eta[5])
         self.R_I_B = R_I_B
 
+        self.manipulator_dynamics.kinematics_.update(self.q)
+
         self.update_joint_positions()
         # self.p_eef = self.eta[0:3] + R_I_B @ self.r_B_0 + R_I_B @ self.R_B_0 @ self.r_0_eef
         # self.att_eef = utils_math.rotation_matrix_to_quaternion(R_I_B @ self.R_B_0 @ utils_math.rotation_matrix_from_quat(self.att_0_eef))
+
+        # print(f"real - ddq: {ddq}")
+        # print(f"real - eta    : {self.eta}")
+        # print(f"real - nu     : {self.nu}")
+        # print(f"real - q    : {self.q}")
+        # print(f"real -  joint 0 position   : {self.joint_positions[0].flatten()}")
+        # print(f"real - nu    : {self.nu.flatten()}")
+        # print(f"real - dnu    : {self.last_dnu.flatten()}")
+        # print(f"real - tau_coupling    : {tau_coupling.flatten()}")
+
+    def get_next_state(self, use_quaternion):
+        if use_quaternion:
+            return np.concatenate((self.q, self.nu, self.eta[0:3], utils_math.euler_to_quat(self.eta[3], self.eta[4], self.eta[5])))
+        else:
+            return np.concatenate((self.q, self.nu, self.eta))
+            
 
     def update_joint_positions(self):
         self.joint_positions[0] = (self.eta[0:3] + self.R_I_B @ self.r_B_0).flatten() # joint 0
