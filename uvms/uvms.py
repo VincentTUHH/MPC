@@ -62,7 +62,7 @@ D_FUN = None
 G_FUN = None
 J_FUN = None
 
-Q0 = np.array([0.8, 8.0, 0.4, 0.2])  # Initial joint angles
+Q0 = np.array([0.1, np.pi/2, np.pi/2, 0.0])  # Initial joint angles
 POS0 = np.array([0.0, 0.0, 0.0])
 ATT0_EULER = np.array([0.0, 0.0, 0.0])
 ATT0_QUAT = utils_math.euler_to_quat(ATT0_EULER[0], ATT0_EULER[1], ATT0_EULER[2])
@@ -626,10 +626,6 @@ def main():
         fixed_point_iter=2,
         n_horizon=10
     )
-    print(JOINT_LIMITS.shape)
-    print(JOINT_LIMITS)
-    return
-    
 
     T_duration = 10.0 # [s]
     dt = 0.05 # sampling [s]
@@ -652,13 +648,20 @@ def main():
         "ipopt.print_level": 5,
         "ipopt.sb": "no",  # "no" disables silent mode, so output is shown
         "ipopt.linear_solver": "mumps",
-        "ipopt.hessian_approximation": "limited-memory"
+        "ipopt.hessian_approximation": "limited-memory" # makes is considerably faster
     }
-    solver = "ipopt"
+    opts = {}
+    # solver = "ipopt"
+    solver = "fatrop"
     u_prev0 = np.full((CTRL_DIM), 0.1)  # initial control input guess
     dnu0 = None # replace later with EKF2 prediction of accelerations
     f_eef_val = np.zeros(3)
     l_eef_val = np.zeros(3)
+
+    # Check if Q0 satisfies joint limits
+    if JOINT_LIMITS is not None:
+        if not np.all((Q0 >= JOINT_LIMITS[0, :N_JOINTS]) & (Q0 <= JOINT_LIMITS[1, :N_JOINTS])):
+            raise ValueError(f"Initial joint angles Q0={Q0} do not satisfy joint limits {JOINT_LIMITS[:, :N_JOINTS]}")
 
     X_real, U_appl, J_hist, X_pred, U_pred = run_mpc(M=M,
             dt=dt,
