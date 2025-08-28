@@ -1,7 +1,8 @@
 import casadi as ca
 import numpy as np
-import common.utils_math as utils_math
-import common.utils_sym as utils_sym
+
+from common import utils_math
+from common import utils_sym
 
 class KinematicsSymbolic:
     def __init__(self, this_DH_table):

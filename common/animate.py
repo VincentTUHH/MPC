@@ -1,9 +1,9 @@
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-import numpy as np
 from matplotlib.lines import Line2D
-from scipy.spatial.transform import Rotation as R
 from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial.transform import Rotation as R
 
 def animate_trajectory(all_links, fps=50):
     timesteps = all_links.shape[0]

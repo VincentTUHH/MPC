@@ -1,8 +1,9 @@
 import numpy as np
+
+from bluerov import dynamics
+from common import utils_math
 from common.animate import animate_bluerov
 from common.my_package_path import get_package_path
-import common.utils_math as utils_math
-import bluerov.dynamics as dynamics
 
 '''
 Simulate BlueROV using the dynamics model.

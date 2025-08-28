@@ -1,19 +1,20 @@
-import bluerov.bluerov as bluerov
-import uvms.model as uvms_model
-import manipulator
-import numpy as np
-import casadi as ca
-import bluerov.dynamics_symbolic as sym_brv
-import manipulator.dynamics_symbolic as sym_manip_dyn
-import manipulator.kinematics_symbolic as sym_manip_kin
-import manipulator.kinematics as manip_kin
 import threading
 from typing import Optional
 
+import numpy as np
+import casadi as ca
+
+from bluerov import dynamics_symbolic as sym_brv
+from uvms import model as uvms_model
+
+from manipulator import (
+    kinematics as manip_kin,
+    kinematics_symbolic as sym_manip_kin,
+    dynamics_symbolic as sym_manip_dyn,
+)
+
+from common import utils_math, utils_sym, animate
 from common.my_package_path import get_package_path
-import common.utils_math as utils_math
-import common.utils_sym as utils_sym
-import common.animate as animate
 
 # -----------------------
 # Global, read-only variables after init()
@@ -258,71 +259,55 @@ def _build_rollout_unrolled(step_fun: ca.Function, N: int) -> ca.Function:
         [X_all, DNU_all, J_all, P_all, A_all]
     )
 
-def solve_cftoc(
-        dt: float,
-        opts: dict,
-        solver: str,
-        x0_val: np.ndarray,
-        f_eef_val: np.ndarray,
-        l_eef_val: np.ndarray,
-        U_guess: np.ndarray,
-        X_guess: np.ndarray,
-        ref_eef_positions: np.ndarray,
-        ref_eef_attitudes: np.ndarray,
-        u_prev0_val: Optional[np.ndarray] = None,
-        dnu0_val: Optional[np.ndarray] = None,
-    ) -> tuple[np.ndarray, np.ndarray, float]:
-    assert ref_eef_positions.shape == (3, N_HORIZON)
-    assert ref_eef_attitudes.shape == (4, N_HORIZON)
-
+def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
     opti = ca.Opti()
-    opti.solver(solver, {"expand": True}, opts)
 
+    # --- decision variables (once) ---
     X = opti.variable(STATE_DIM, N_HORIZON+1)
     U = opti.variable(CTRL_DIM, N_HORIZON)
 
-    x0p    = opti.parameter(STATE_DIM); opti.set_value(x0p, x0_val)
-    Uprev0 = opti.parameter(CTRL_DIM);  opti.set_value(Uprev0, u_prev0_val)
-    dnu0   = opti.parameter(N_DOF);     opti.set_value(dnu0, dnu0_val)
+    # --- parameters (change every step) ---
+    x0p         = opti.parameter(STATE_DIM)   # initial state
+    Uprev0      = opti.parameter(CTRL_DIM)    # previous input for Δu and ddq
+    dnu0        = opti.parameter(N_DOF)       # predictor seed
+    veh_pos_ref = opti.parameter(3)           # station-keeping reference
 
-    f_eef = f_eef_val
-    l_eef = l_eef_val
+    # If you still need these:
+    f_eef_p     = opti.parameter(3)
+    l_eef_p     = opti.parameter(3)
 
+    # --- initials and boundary condition ---
     opti.subject_to(X[:, 0] == x0p)
-    opti.set_initial(U, U_guess)
-    opti.set_initial(X, X_guess)
 
-    Qp = ca.DM.eye(3)
-    Qa = ca.DM.eye(3)
-    Qvehicle_pos = ca.DM.eye(3) * 100
-    Qvel = ca.DM.eye(N_DOF) * 1.0 
-    Ru = ca.DM.eye(CTRL_DIM) * 1e-4
-    Rdu = ca.DM.eye(CTRL_DIM) * 1e-3
+    # --- weights (tune as you like) ---
+    Qpos = ca.DM.eye(3) * 100.0
+    Qvel = ca.DM.eye(N_DOF) * 1.0
+    R    = ca.DM.eye(CTRL_DIM) * 1e-4
+    Rdu  = ca.DM.eye(CTRL_DIM) * 1e-3
 
+    # --- rollout over horizon ---
     u_prev = Uprev0
     dnu_g  = dnu0
+    cost   = 0
 
-    cost = 0
+    # (Optional) if you’re only station-keeping, use a lean STEP that returns just x_next (and maybe dnu)
     for k in range(N_HORIZON):
         xk = X[:, k]
         uk = U[:, k]
         ddq_k = (uk[0:N_JOINTS] - u_prev[0:N_JOINTS]) / dt
-        xkp1, dnu_k, Jk, Pk, Ak = STEP(dt, xk, uk, ddq_k, dnu_g, f_eef, l_eef)
+
+        # Keep existing STEP call:
+        xkp1, dnu_k, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu_g, f_eef_p, l_eef_p)
         opti.subject_to(X[:, k+1] == xkp1)
 
-        vehicle_pos_k = X[N_JOINTS+N_DOF:N_JOINTS+N_DOF+3, k]
-        vehicle_error = ca.DM(np.array([1.0, 0, 0])) - vehicle_pos_k
-        cost += vehicle_error.T @ Qvehicle_pos @ vehicle_error
+        # costs: hold position, damp velocities, modest effort & smoothness
+        veh_pos_k = X[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3, k]
+        nu_k      = X[N_JOINTS : N_JOINTS+N_DOF, k]
+        pos_err   = veh_pos_ref - veh_pos_k
 
-
-
-        # pos_err = ref_eef_positions[:, k] - Pk
-        # att_err = utils_sym.quaternion_error(ref_eef_attitudes[:, k], Ak)
-        # cost += pos_err.T @ Qp @ pos_err + att_err.T @ Qa @ att_err
-        nu_k = X[N_JOINTS : N_JOINTS+N_DOF, k]
-        cost += nu_k.T @ Qvel @ nu_k
-
-        cost += uk.T @ Ru @ uk
+        cost += pos_err.T @ Qpos @ pos_err
+        cost += nu_k.T   @ Qvel @ nu_k
+        cost += uk.T     @ R    @ uk
         cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
 
         if USE_PWM:
@@ -330,30 +315,75 @@ def solve_cftoc(
             opti.subject_to(U[N_JOINTS:, k] >= -1.0)
 
         # Joint position limits constraints
-
-        opti.subject_to(U[0:N_JOINTS, k] <= JOINT_VELOCITIES)
-        opti.subject_to(U[0:N_JOINTS, k] >= JOINT_VELOCITIES * -1)
+        opti.subject_to(U[0:N_JOINTS, k] <= JOINT_VELOCITIES[:N_JOINTS])
+        opti.subject_to(U[0:N_JOINTS, k] >= (-1 * JOINT_VELOCITIES[:N_JOINTS]))
 
         # Joint velocity limits constraints
-        opti.subject_to(X[:N_JOINTS, k] <= JOINT_LIMITS[1, :])
-        opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :])
+        opti.subject_to(X[:N_JOINTS, k] <= JOINT_LIMITS[1, :N_JOINTS])
+        opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :N_JOINTS])
 
         u_prev = uk
         dnu_g  = dnu_k
 
     opti.minimize(cost)
-    
+
+    # --- solver options (expand + limited-memory helps!) ---
+    # casadi_opts = {"expand": True} # removing that made it faster, but stll no output in terminal
+    casadi_opts = {}
+    opti.solver(solver, ipopt_opts, casadi_opts)
+
+    # Return handles you’ll reuse
+    handles = {
+        "opti": opti, "X": X, "U": U,
+        "x0p": x0p, "Uprev0": Uprev0, "dnu0": dnu0,
+        "veh_pos_ref": veh_pos_ref,
+        "f_eef_p": f_eef_p, "l_eef_p": l_eef_p
+    }
+    return handles
+
+def solve_cftoc(
+        handles: dict,
+        *,
+        x0_val: np.ndarray,
+        u_prev0_val: np.ndarray,
+        dnu0_val: Optional[np.ndarray],
+        U_guess: np.ndarray,
+        X_guess: np.ndarray,
+        f_eef_val: np.ndarray,
+        l_eef_val: np.ndarray,
+        veh_pos_ref_val: np.ndarray,
+        ref_eef_positions: np.ndarray,
+        ref_eef_attitudes: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+    assert ref_eef_positions.shape == (3, N_HORIZON)
+    assert ref_eef_attitudes.shape == (4, N_HORIZON)
+
+    opti = handles["opti"]
+    X    = handles["X"]
+    U    = handles["U"]
+
+    # Robust defaults
+    if dnu0_val is None:
+        dnu0_val = np.zeros(N_DOF)
+
+    # Set parameters
+    opti.set_value(handles["x0p"], x0_val)
+    opti.set_value(handles["Uprev0"], u_prev0_val)
+    opti.set_value(handles["dnu0"], dnu0_val)
+    opti.set_value(handles["veh_pos_ref"], veh_pos_ref_val)
+    opti.set_value(handles["f_eef_p"], f_eef_val)
+    opti.set_value(handles["l_eef_p"], l_eef_val)
+
+    # Warm starts
+    opti.set_initial(U, U_guess)
+    opti.set_initial(X, X_guess)
+
     try:
         sol = opti.solve()
-        X_opt = sol.value(X)
-        U_opt = sol.value(U)
-        J_opt = float(sol.value(cost))
-        return X_opt, U_opt, J_opt
+        return sol.value(X), sol.value(U), float(sol.value(opti.f))
     except RuntimeError:
-        print("Infeasible. Debug info:")
-        print("x0:", opti.debug.value(X[:, 0]))
-        print("u0:", opti.debug.value(U[:, 0]))
-        return np.zeros((X.shape[0], N_HORIZON+1)), np.zeros((U.shape[0], N_HORIZON)), 1e6
+        # Optional: inspect infeasibility here
+        return np.zeros((STATE_DIM, N_HORIZON+1)), np.zeros((CTRL_DIM, N_HORIZON)), 1e6
     
 # def task_eef_tracking():
 #     pass
@@ -374,7 +404,9 @@ def run_mpc(
     dnu0: Optional[np.ndarray] = None,
     f_eef_val: Optional[np.ndarray] = None,
     l_eef_val: Optional[np.ndarray] = None,
+    veh_pos_ref_val: Optional[np.ndarray] = None,
 ):
+    handles = build_ocp_template(dt=dt, solver=solver, ipopt_opts=opts)
     assert x0.shape[0] == STATE_DIM
     assert ref_eef_positions.shape == (3, M)
     assert ref_eef_attitudes.shape == (4, M)
@@ -412,18 +444,17 @@ def run_mpc(
     for step in range(M):
         print(f"Step {step + 1} / {M}")
         X_opt, U_opt, J_opt = solve_cftoc(
-            dt=dt,
-            opts=opts,
-            solver=solver,
+            handles=handles,
             x0_val=X_real[:, step],
+            u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1],
+            dnu0_val=dnu0,
+            U_guess=U_guess,
+            X_guess=X_guess,            
             f_eef_val=f_eef_val,
             l_eef_val=l_eef_val,
-            U_guess=U_guess,
-            X_guess=X_guess,
+            veh_pos_ref_val=veh_pos_ref_val,
             ref_eef_positions=ref_eef_positions[:, step:step+N_HORIZON],
             ref_eef_attitudes=ref_eef_attitudes[:, step:step+N_HORIZON],
-            u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1],
-            dnu0_val=dnu0
         )
 
         X_pred[:, :, step] = X_opt
@@ -521,6 +552,7 @@ def init_uvms_model(
         if joint_limits_path:
             JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, _ = utils_math.load_joint_limits(joint_limits_path)
             JOINT_LIMITS = np.array(JOINT_LIMITS).T
+            JOINT_VELOCITIES = np.array(JOINT_VELOCITIES).T
         ALPHA_PARAMS = utils_math.load_dynamic_params(manipulator_dyn_params_paths)
         MANIP_KIN = sym_manip_kin.KinematicsSymbolic(MANIP_PARAMS)
         MANIP_DYN = sym_manip_dyn.DynamicsSymbolic(MANIP_KIN, ALPHA_PARAMS)
@@ -594,21 +626,33 @@ def main():
         fixed_point_iter=2,
         n_horizon=10
     )
+    print(JOINT_LIMITS.shape)
+    print(JOINT_LIMITS)
     return
+    
 
     T_duration = 10.0 # [s]
     dt = 0.05 # sampling [s]
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
+    veh_pos_ref_val = np.zeros(3)
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}
-    opts = {'ipopt.print_level': 5, 'print_time': 1}
-    opts = {"print_time": 0,
-        "ipopt.print_level": 0,
-        "ipopt.sb": "yes",
-        "ipopt.linear_solver": "mumps",           # or ma57 if available
-        "ipopt.hessian_approximation": "limited-memory"  # great for large graphs
+    # opts = {'ipopt.print_level': 5, 'print_time': 1}
+    # opts = {
+    #     "print_time": 1,
+    #     "ipopt.print_level": 5,
+    #     "ipopt.sb": "yes",
+    #     "ipopt.linear_solver": "mumps",           # or ma57 if available
+    #     "ipopt.hessian_approximation": "limited-memory"  # great for large graphs
+    # }
+    opts = {
+        "print_time": True,
+        "ipopt.print_level": 5,
+        "ipopt.sb": "no",  # "no" disables silent mode, so output is shown
+        "ipopt.linear_solver": "mumps",
+        "ipopt.hessian_approximation": "limited-memory"
     }
     solver = "ipopt"
     u_prev0 = np.full((CTRL_DIM), 0.1)  # initial control input guess
@@ -619,6 +663,7 @@ def main():
     X_real, U_appl, J_hist, X_pred, U_pred = run_mpc(M=M,
             dt=dt,
             x0=x0,
+            veh_pos_ref_val=veh_pos_ref_val,
             ref_eef_positions=ref_eef_pos,
             ref_eef_attitudes=ref_eef_att,
             opts=opts,

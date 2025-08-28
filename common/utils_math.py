@@ -1,9 +1,10 @@
-import numpy as np
-from scipy.spatial.transform import Rotation as Rot
 import yaml
 from copy import deepcopy
 from types import SimpleNamespace
+
+import numpy as np
 import pandas as pd
+from scipy.spatial.transform import Rotation as Rot
 
 # Define commonly used constants
 GRAVITY_VECTOR = np.array([0, 0, -9.81])

@@ -1,7 +1,7 @@
 import casadi as ca
 import numpy as np
-import common.utils_sym as utils_sym
-from manipulator.kinematics_symbolic import KinematicsSymbolic
+
+from common import utils_sym
 
 # all variables used together with the optimization variable must be casadi variabeles
 # variables taht are constant should be DM as they are faster to evaluate

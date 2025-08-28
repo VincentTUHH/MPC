@@ -1,6 +1,7 @@
 import casadi as ca
 import numpy as np
-import common.utils_sym as utils_sym
+
+from common import utils_sym
 
 class BlueROVDynamicsSymbolic:
     def __init__(self, params):

@@ -1,15 +1,20 @@
+import time
 import numpy as np
 import casadi as ca
-import time
+import matplotlib.pyplot as plt
+
 from manipulator.kinematics import Kinematics
 from manipulator.kinematics_symbolic import KinematicsSymbolic
-import common.utils_math as utils_math
+
+from common import utils_math
+from common.my_package_path import get_package_path
 from common.animate import (
     animate_trajectory,
-    plot_eef_positions, plot_tracking_errors, plot_prediction_error, plot_joint_angles,
+    plot_eef_positions,
+    plot_tracking_errors,
+    plot_prediction_error,
+    plot_joint_angles,
 )
-from common.my_package_path import get_package_path
-import matplotlib.pyplot as plt
 
 
 '''

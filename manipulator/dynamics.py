@@ -1,6 +1,6 @@
 import numpy as np
-import common.utils_math as utils_math
-import manipulator.kinematics as kinematics
+
+from common import utils_math
 
 class Dynamics:
     def __init__(self, kinematics, alpha_params=None):

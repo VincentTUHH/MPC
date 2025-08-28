@@ -1,9 +1,9 @@
 import numpy as np
-import common.utils_math as utils_math
-import manipulator.kinematics as manip_kinematics
-import manipulator.dynamics as manip_dynamics
-import bluerov.dynamics as bluerov_dynamics
-import scipy.linalg
+
+from bluerov import dynamics as bluerov_dynamics
+from manipulator import kinematics as manip_kinematics
+from manipulator import dynamics as manip_dynamics
+from common import utils_math
 
 class UVMSModel:
     def __init__(self, DH_table, alpha_params, bluerov_params_dynamic, q0, pos, att, vel, omega):

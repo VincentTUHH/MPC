@@ -1,5 +1,6 @@
 import numpy as np
-import common.utils_math as utils_math
+
+from common import utils_math
 
 class Kinematics:
     def __init__(self, DH_table):

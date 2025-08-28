@@ -1,12 +1,13 @@
-import uvms.model as uvms_model
-import uvms.uvms as uvms
-from common.my_package_path import get_package_path
-import common.utils_math as utils_math
 import numpy as np
 import casadi as ca
-import common.animate as animate
-import manipulator.kinematics_symbolic as sym_manip_kin
 import matplotlib.pyplot as plt
+
+from uvms import model as uvms_model
+from uvms import uvms
+from manipulator import kinematics_symbolic as sym_manip_kin
+
+from common import utils_math
+from common import animate
 
 Q0 = np.array([0.8, 8.0, 0.4, 0.2]) #np.array([np.pi, np.pi * 0.5, np.pi * 0.75, np.pi * 0.5])
 POS0 = np.zeros(3) # np.array([-0.2, -0.5, -0.8])

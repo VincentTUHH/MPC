@@ -1,10 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
-from common.my_package_path import get_package_path
-import common.utils_math as utils_math
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
+
+from common import utils_math
+from common.my_package_path import get_package_path
 
 # --- Data Normalization Utilities ---
 

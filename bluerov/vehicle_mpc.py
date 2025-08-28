@@ -1,15 +1,29 @@
+import time
+
 import casadi as ca
 import numpy as np
-import bluerov.dynamics as dynamics
-import bluerov.dynamics_symbolic as dynamics_symbolic
-import bluerov.bluerov as bluerov
-from common.animate import animate_bluerov, plot_vehicle_xy_vs_reference, plot_box_test, plot_pose_error_boxplots, plot_jacobian_condition_number, plot_vehicle_euler_angles_vs_reference_time, plot_vehicle_pos_vs_reference_time, plot_delta_u, plot_mpc_cost, plot_velocities, plot_control_inputs
-import time
 from scipy.linalg import solve_continuous_are
+
+from bluerov import dynamics
+from bluerov import dynamics_symbolic
+from bluerov import bluerov
+
+from common import utils_sym
+from common import utils_math
 from common.my_package_path import get_package_path
-import casadi as ca
-import common.utils_sym as utils_sym
-import common.utils_math as utils_math
+from common.animate import (
+    animate_bluerov,
+    plot_vehicle_xy_vs_reference,
+    plot_box_test,
+    plot_pose_error_boxplots,
+    plot_jacobian_condition_number,
+    plot_vehicle_euler_angles_vs_reference_time,
+    plot_vehicle_pos_vs_reference_time,
+    plot_delta_u,
+    plot_mpc_cost,
+    plot_velocities,
+    plot_control_inputs,
+)
 
 def compute_lqr_gain(A, B, Q=None, R=None):
     # Q, R can be tuned; default to identity

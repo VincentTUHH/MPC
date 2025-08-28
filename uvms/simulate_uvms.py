@@ -1,6 +1,6 @@
-import uvms.model as model
-import common.animate as animate
 import numpy as np
+
+from common import animate
 
 def main():
      # Example usage for animate_trajectory
