@@ -1,5 +1,6 @@
 import threading
 from typing import Optional
+import time
 
 import numpy as np
 import casadi as ca
@@ -15,6 +16,7 @@ from manipulator import (
 
 from common import utils_math, utils_sym, animate
 from common.my_package_path import get_package_path
+from common import animate
 
 # -----------------------
 # Global, read-only variables after init()
@@ -96,7 +98,7 @@ def _build_tau_coupling_func() -> ca.Function:
         'rnem_func',
         [q, dq, ddq, v_ref, a_ref, w_ref, dw_ref, quaternion_ref, f_eef, l_eef],
         [tau]
-    )
+    ).expand()
 
 def _build_dynamics_fossen_func() -> ca.Function:
     nu   = ca.MX.sym('nu', N_DOF)
@@ -106,7 +108,7 @@ def _build_dynamics_fossen_func() -> ca.Function:
 
     tau_v = (L * V_BAT * (MIXER @ uv)) if USE_PWM else uv
     dnu  = M_INV @ (tau_v + tau_c - C_FUN(nu) @ nu - D_FUN(nu) @ nu - G_FUN(eta))
-    return ca.Function('dyn_fossen', [eta,nu,uv,tau_c], [dnu])
+    return ca.Function('dyn_fossen', [eta,nu,uv,tau_c], [dnu]).expand()
 
 def _build_eef_blocks() -> tuple[ca.Function, ca.Function]:
     eta = ca.MX.sym('eta', 7 if USE_QUATERNION else 6)
@@ -134,8 +136,8 @@ def _build_eef_blocks() -> tuple[ca.Function, ca.Function]:
     J_eef[3:6, 3:6]      = R_I_B
     J_eef[3:6, 6:]       = R_I_B @ R_B_0 @ J_rot
 
-    f_pose = ca.Function('eef_pose',  [eta, q], [p_eef, att_eef])
-    f_Jeef = ca.Function('J_eef_fun', [eta, q], [J_eef])
+    f_pose = ca.Function('eef_pose',  [eta, q], [p_eef, att_eef]).expand()
+    f_Jeef = ca.Function('J_eef_fun', [eta, q], [J_eef]).expand()
     return f_pose, f_Jeef
 
 def _build_f_sys(
@@ -183,7 +185,7 @@ def _build_f_sys(
     J_eef          = J_eef_fun(eta, q)
 
     return ca.Function('f_sys', [x, u, ddq_in, dnu_g, f_eef, l_eef],
-                       [xdot, dnu, J_eef, p_eef, att_eef])
+                       [xdot, dnu, J_eef, p_eef, att_eef]).expand()
 
 def _build_step_func(f_sys: ca.Function) -> ca.Function:
     dt     = ca.MX.sym('dt')
@@ -221,7 +223,7 @@ def _build_step_func(f_sys: ca.Function) -> ca.Function:
         raise ValueError("INTEGRATOR must be 'euler' or 'rk4'")
 
     return ca.Function('step', [dt, x, u, ddq_in, dnu_g, f_eef, l_eef],
-                       [x_next, dnu, J_eef, p_eef, att_eef])
+                       [x_next, dnu, J_eef, p_eef, att_eef]).expand()
 
 def _build_rollout_unrolled(step_fun: ca.Function, N: int) -> ca.Function:
     x0     = ca.MX.sym('x0', STATE_DIM)
@@ -257,7 +259,7 @@ def _build_rollout_unrolled(step_fun: ca.Function, N: int) -> ca.Function:
     return ca.Function('rollout_unrolled',
         [x0, U, Uprev0, dt, dnu0, f_eef, l_eef],
         [X_all, DNU_all, J_all, P_all, A_all]
-    )
+    ).expand()
 
 def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
     opti = ca.Opti()
@@ -329,8 +331,8 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
 
     # --- solver options (expand + limited-memory helps!) ---
     # casadi_opts = {"expand": True} # removing that made it faster, but stll no output in terminal
-    casadi_opts = {}
-    opti.solver(solver, ipopt_opts, casadi_opts)
+    # casadi_opts = {}
+    opti.solver(solver, ipopt_opts) #, solver_options = solver_options)
 
     # Return handles you’ll reuse
     handles = {
@@ -354,6 +356,7 @@ def solve_cftoc(
         veh_pos_ref_val: np.ndarray,
         ref_eef_positions: np.ndarray,
         ref_eef_attitudes: np.ndarray,
+        lam_g_prev: Optional[np.ndarray],
     ) -> tuple[np.ndarray, np.ndarray, float]:
     assert ref_eef_positions.shape == (3, N_HORIZON)
     assert ref_eef_attitudes.shape == (4, N_HORIZON)
@@ -378,9 +381,15 @@ def solve_cftoc(
     opti.set_initial(U, U_guess)
     opti.set_initial(X, X_guess)
 
+    if lam_g_prev is not None:
+        opti.set_initial(opti.lam_g, lam_g_prev)
+
     try:
         sol = opti.solve()
-        return sol.value(X), sol.value(U), float(sol.value(opti.f))
+        Xv = sol.value(X); Uv = sol.value(U)
+        Jv = float(sol.value(opti.f))
+        lamg = sol.value(opti.lam_g)     # <-- duals
+        return Xv, Uv, Jv, lamg
     except RuntimeError:
         # Optional: inspect infeasibility here
         return np.zeros((STATE_DIM, N_HORIZON+1)), np.zeros((CTRL_DIM, N_HORIZON)), 1e6
@@ -441,9 +450,15 @@ def run_mpc(
         ref_eef_positions = np.hstack([ref_eef_positions, np.tile(ref_eef_positions[:, -1][:, None], (1, pad_count))])
         ref_eef_attitudes = np.hstack([ref_eef_attitudes, np.tile(ref_eef_attitudes[:, -1][:, None], (1, pad_count))])
 
+    start_time = None
+
+    lam_g_last = None
+
     for step in range(M):
+        if step == 1:
+            start_time = time.time()
         print(f"Step {step + 1} / {M}")
-        X_opt, U_opt, J_opt = solve_cftoc(
+        X_opt, U_opt, J_opt, lam_g_last = solve_cftoc(
             handles=handles,
             x0_val=X_real[:, step],
             u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1],
@@ -455,6 +470,7 @@ def run_mpc(
             veh_pos_ref_val=veh_pos_ref_val,
             ref_eef_positions=ref_eef_positions[:, step:step+N_HORIZON],
             ref_eef_attitudes=ref_eef_attitudes[:, step:step+N_HORIZON],
+            lam_g_prev=lam_g_last,
         )
 
         X_pred[:, :, step] = X_opt
@@ -482,6 +498,9 @@ def run_mpc(
         U_guess = np.hstack([U_opt[:, 1:], U_opt[:, -1][:, None]])
         X_guess = np.hstack([X_opt[:, 1:], X_opt[:, -1][:, None]])
         X_guess[:, 0] = X_real[:, step+1]
+
+    end_time = time.time()
+    print(f"MPC computation time: {end_time - start_time:.2f} seconds")
 
     return X_real, U_appl, J_hist, X_pred, U_pred
 
@@ -628,10 +647,10 @@ def main():
     )
 
     T_duration = 10.0 # [s]
-    dt = 0.05 # sampling [s]
+    dt = 0.1 # sampling [s]
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
-    veh_pos_ref_val = np.zeros(3)
+    veh_pos_ref_val = np.array([5.0, 0.0, 0.0])  # desired vehicle position for station-keeping
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}
@@ -644,15 +663,66 @@ def main():
     #     "ipopt.hessian_approximation": "limited-memory"  # great for large graphs
     # }
     opts = {
-        "print_time": True,
-        "ipopt.print_level": 5,
-        "ipopt.sb": "no",  # "no" disables silent mode, so output is shown
-        "ipopt.linear_solver": "mumps",
-        "ipopt.hessian_approximation": "limited-memory" # makes is considerably faster
-    }
-    opts = {}
-    # solver = "ipopt"
-    solver = "fatrop"
+    "expand": True,                 # lets CasADi simplify the graph
+    "print_time": False,            # no timing line from CasADi
+    "ipopt.print_level": 0,         # 0 = silent
+    "ipopt.sb": "yes",              # “small banner”: removes the big header
+    "ipopt.file_print_level": 0,    # don’t write a log file
+    "ipopt.mu_strategy": "adaptive",
+    "ipopt.linear_solver": "mumps",     # keep; switch to 'pardiso' if you have it
+    "ipopt.max_iter": 100,              # avoid long tail
+    "ipopt.acceptable_tol": 1e-3,       # stop earlier if “good enough”
+    "ipopt.acceptable_obj_change_tol": 1e-4,
+
+    "ipopt.tol": 1e-6,               # default 1e-8; relax a bit
+    "ipopt.constr_viol_tol": 1e-6,   # same
+
+    "ipopt.nlp_scaling_method": "gradient-based", # about robustness
+
+    "ipopt.fast_step_computation": "yes", # fewer factorizations per iter; slight robustness trade-off
+
+    "ipopt.warm_start_init_point": "yes", # warm starting sped up by factor 2 from 6s to 2s for T = 10s and dt = 0,2s
+    "ipopt.warm_start_bound_push": 1e-8,
+    "ipopt.warm_start_mult_bound_push": 1e-6,
+
+    "ipopt.warm_start_slack_bound_push": 1e-8,  # if you have slacks
+    "ipopt.mu_strategy": "adaptive",
+    # Optional: can help when reusing duals
+    "ipopt.mu_init": 1e-3,
+
+    "ipopt.tol": 1e-6,              # default 1e-8; relax a bit
+    "ipopt.constr_viol_tol": 1e-6,  # default 1e-8
+    # "ipopt.hessian_approximation": "limited-memory",  # L-BFGS
+    # "ipopt.limited_memory_max_history": 20, 
+}
+    # opts = {
+    #     "jit": True,
+    #     'compiler': 'shell',
+    #     'jit_options': {'compiler': 'gcc', 'flags': ['-O3']}
+    # }
+    # opts = {
+    #     "print_time": False,
+    #     "expand": True,
+    #     # "structure_detection": 'none','auto',
+    #     # "jit": True,
+    #     # "jit_options": {'compiler': 'gcc', 'flags': ['-O3']},
+    #     "detect_simple_bounds": True,
+    #     "fatrop": {            # FATROP-native options
+    #         "print_level": 0,
+    #         "max_iter": 300,
+    #         "tol": 1e-8,
+    #         "acceptable_tol": 1e-4,
+    #         "acceptable_iter": 7,
+    #         "constr_viol_tol": 1e-6,
+    #         "warm_start_init_point": True,
+    #         "linsol_iterative_refinement": True,
+    #         "ls_scaling": True,
+    #         "bound_push": 1e-4,
+    #         "bound_frac": 1e-4,
+    #     }, # https://github.com/ytwboxing/fatrop-fork/blob/811d36ce272f49bca5d857809b6258422e369b37/fatrop/solver/FatropOptions.hpp
+    # }
+    solver = "ipopt"
+    # solver = "fatrop"
     u_prev0 = np.full((CTRL_DIM), 0.1)  # initial control input guess
     dnu0 = None # replace later with EKF2 prediction of accelerations
     f_eef_val = np.zeros(3)
@@ -676,6 +746,10 @@ def main():
             f_eef_val=f_eef_val,
             l_eef_val=l_eef_val
             )
+    
+    R_B_0 = MANIP_DYN.R_reference
+    r_B_0 = MANIP_DYN.tf_vec
+    animate.animate_uvms_from_state(X_real, MANIP_PARAMS, R_B_0, r_B_0, dt)
     
     import matplotlib.pyplot as plt
 
@@ -772,6 +846,7 @@ def main():
 
     # # Animate the UVMS
     # animate.animate_uvms(eta_history, joint_history, dt)
+    
     return
 
 if __name__ == "__main__":

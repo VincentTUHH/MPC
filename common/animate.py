@@ -5,6 +5,10 @@ from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.spatial.transform import Rotation as R
 
+from manipulator import kinematics as manip_kin
+from common import utils_math
+
+
 def animate_trajectory(all_links, fps=50):
     timesteps = all_links.shape[0]
     # Compute min/max for each axis, add margin
@@ -163,6 +167,51 @@ def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
 
     ani = FuncAnimation(fig, update, frames=eta_all.shape[0], interval=dt*1000)
     plt.show()
+
+def animate_uvms_from_state(X_all, manip_params, R_B_0, r_B_0, dt, box_size=(0.4571, 0.575, 0.2539)):
+    """
+    Animate the trajectory of a UVMS (vehicle + manipulator) in 3D space from state trajectory X_all.
+    - X_all: (n_steps, N_state) state trajectory, first N_JOINTS are joint positions, last 7 are vehicle pose (xyz + quaternion)
+    - DH_table: Denavit-Hartenberg table for manipulator kinematics
+    - dt: sampling time
+    - box_size: vehicle bounding box dimensions
+    """
+    n_steps = X_all.shape[1]
+
+    # Extract joint positions and vehicle pose
+    eta_all = []
+    all_links = []
+
+    kin = manip_kin.Kinematics(manip_params)
+    n_joints = kin.n_joints
+    for i in range(n_steps):
+        q = X_all[:n_joints, i]
+        eta = X_all[-7:, i]
+        pos_veh = eta[:3]
+        quat_veh = eta[3:]  # [qw, qx, qy, qz] or [qx, qy, qz, qw] depending on convention
+        euler = utils_math.quat_to_euler(quat_veh)
+
+        kin.update(q)
+        R_I_B = utils_math.rotation_matrix_from_quat(quat_veh)
+
+        # Get manipulator joint positions in manipulator base frame
+        joint_positions = [pos_veh + R_I_B @ r_B_0]
+        for idx in range(n_joints + 1):
+            link_pos = kin.get_link_position(idx)
+            link_pos = np.squeeze(link_pos)  # Remove singleton dimension if present
+            joint_positions.append(joint_positions[0] + R_I_B @ R_B_0 @ link_pos)
+        joint_positions = np.array(joint_positions)
+        joint_positions = np.squeeze(joint_positions)  # Remove singleton dimension if present
+        all_links.append(joint_positions)
+
+        eta_euler = np.concatenate((pos_veh, euler))
+        eta_all.append(eta_euler)
+
+    eta_all = np.array(eta_all)
+    all_links = np.array(all_links)
+
+    # Call original animate_uvms
+    animate_uvms(eta_all, all_links, dt, box_size=box_size)
 
 def animate_uvms(eta_all, all_links, dt, box_size=(0.4571, 0.575, 0.2539)):
     """
