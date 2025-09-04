@@ -299,15 +299,18 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         ddq_k = (uk[0:N_JOINTS] - u_prev[0:N_JOINTS]) / dt
 
         # Keep existing STEP call:
-        xkp1, dnu_k, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu_g, f_eef_p, l_eef_p)
+        xkp1, dnu_k, J_eef, p_eef, att_eef = STEP(dt, xk, uk, ddq_k, dnu_g, f_eef_p, l_eef_p)
         opti.subject_to(X[:, k+1] == xkp1)
 
         # costs: hold position, damp velocities, modest effort & smoothness
-        veh_pos_k = X[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3, k]
+        # veh_pos_k = X[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3, k]
         nu_k      = X[N_JOINTS : N_JOINTS+N_DOF, k]
-        pos_err   = veh_pos_ref - veh_pos_k
+        # pos_err   = veh_pos_ref - veh_pos_k
 
-        cost += pos_err.T @ Qpos @ pos_err
+        pos_err_eef = veh_pos_ref - p_eef
+
+        # cost += pos_err.T @ Qpos @ pos_err
+        cost += pos_err_eef.T @ Qpos @ pos_err_eef
         cost += nu_k.T   @ Qvel @ nu_k
         cost += uk.T     @ R    @ uk
         cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
@@ -647,10 +650,10 @@ def main():
     )
 
     T_duration = 10.0 # [s]
-    dt = 0.1 # sampling [s]
+    dt = 0.05 # sampling [s]
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
-    veh_pos_ref_val = np.array([5.0, 0.0, 0.0])  # desired vehicle position for station-keeping
+    veh_pos_ref_val = np.array([0.8, 0.0, -0.1])  # desired vehicle position for station-keeping
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}
