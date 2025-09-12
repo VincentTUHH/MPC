@@ -76,6 +76,17 @@ MANIP_PARAMS: Optional[dict] = None
 ALPHA_PARAMS: Optional[dict] = None
 BRV_PARAMS: Optional[dict] = None
 
+def check_collision(obj1, obj2):
+    #obj1 = {'p1': np.array([1.0, 2.0, 3.0]), 'p2': np.array([4.0, 5.0, 6.0]), 'radius': 1.0} # line-swept-sphere
+    #obj2 = {'p1': np.array([2.0, 4.0, 8.0]), 'p2': np.array([2.0, 4.0, 8.0]), 'radius': 1.0} # point-swept-sphere
+
+    # extract points and pass to Lumelsky
+    # add radii for distance of bounding volumes
+    pass
+
+def Lumelsky(obj1, obj2):
+    pass
+
 def _build_tau_coupling_func() -> ca.Function:
     q = ca.MX.sym('q', N_JOINTS)
     dq = ca.MX.sym('dq', N_JOINTS)
