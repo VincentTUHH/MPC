@@ -5,6 +5,31 @@ GRAVITY_VECTOR = ca.DM([0, 0, -9.81])
 
 UNIT_Z = ca.DM([0, 0, 1])
 
+def softplus(x):
+    """Numerically stable calculation for log(1 + exp(x)), CasADi symbolic version."""
+    return ca.log(1 + ca.exp(x))
+
+def softplus_stable(x):
+    """Numerisch stabilere Berechnung für log(1 + exp(x)), CasADi symbolic version."""
+    return ca.fmax(x, 0) + ca.log(1 + ca.exp(-ca.fabs(x)))
+
+def softminus(x):
+    """CasADi symbolic version."""
+    return -softplus(-x)
+
+def softclip(x, a=None, b=None, beta=None):
+    """
+    Clipping with softplus and softminus, with parameterized corner sharpness.
+    Set either (or both) endpoint to None to indicate no clipping at that end.
+    CasADi symbolic version.
+    """
+    # when clipping at both ends, make beta dimensionless w.r.t. (b - a) / 2
+    beta = beta / ((b - a) / 2)
+    v = x
+    v = v - softminus(beta * (x - a)) / beta
+    v = v - softplus(beta * (x - b)) / beta
+    return v
+
 def rotation_matrix_from_quat(quat):
     """
     Convert quaternion [w, x, y, z] to rotation matrix (3x3).

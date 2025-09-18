@@ -11,6 +11,33 @@ GRAVITY_VECTOR = np.array([0, 0, -9.81])
 
 UNIT_Z = np.array([0, 0, 1])
 
+def softplus(x):
+    """numerically stable calcuation for log(1 + exp(x))"""
+    return np.log(1 + np.exp(x))
+
+def softplus_stable(x):
+    """Numerisch stabilere Berechnung für log(1 + exp(x))"""
+    return np.maximum(x, 0) + np.log(1 + np.exp(-np.abs(x)))
+
+def softminus(x):
+    return -softplus(-x)
+
+def softclip(x, a=None, b=None, beta=None):
+    """
+    Clipping with softplus and softminus, with paramterized corner sharpness.
+    Set either (or both) endpoint to None to indicate no clipping at that end.
+    """
+    # when clipping at both ends, make c dimensionless w.r.t. b - a / 2  
+    if a is not None and b is not None:
+        beta /= (b - a) / 2
+
+    v = x
+    if a is not None:
+        v = v - softminus(beta*(x - a)) / beta
+    if b is not None:
+        v = v - softplus(beta*(x - b)) / beta
+    return v
+
 def rotation_matrix_from_quat(q):
     """
     Convert quaternion [w, x, y, z] to rotation matrix (3x3).

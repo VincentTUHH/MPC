@@ -17,6 +17,7 @@ from manipulator import (
 from common import utils_math, utils_sym, animate
 from common.my_package_path import get_package_path
 from common import animate
+from mpl_toolkits.mplot3d import Axes3D
 
 # -----------------------
 # Global, read-only variables after init()
@@ -84,8 +85,229 @@ def check_collision(obj1, obj2):
     # add radii for distance of bounding volumes
     pass
 
-def Lumelsky(obj1, obj2):
-    pass
+def Lumelsky_old(p11, p12, p21, p22):
+    d1 = p12 - p11
+    d2 = p22 - p21
+    d12 = p21 - p11
+
+    D1 = np.dot(d1, d1)  # squared 2-norm of d1
+    D2 = np.dot(d2, d2)  # squared 2-norm of d2
+    R = np.dot(d1, d2)
+    S1 = np.dot(d1, d12)
+    S2 = np.dot(d2, d12)
+
+    denominator = D1 * D2 - R * R
+
+    step = 1
+    found_result = False
+    switch = False
+
+    while not found_result:
+
+        if step == 1:
+            if D1 == 0:
+                u = 0
+                # Swap d1 <-> d2, D1 <-> D2, S1 <-> S2
+                switch = True
+                d1, d2 = d2, d1
+                d12 = -d12
+                D1, D2 = D2, D1
+                S1, S2 = -S2, -S1
+                step = 4
+            elif D2 == 0:
+                u = 0
+                step = 4
+            elif D1 == 0 and D2 == 0:
+                u = 0
+                t = 0
+                step = 5
+            elif D1 != 0 and D2 != 0 and denominator == 0:
+                t = 0
+                step = 3
+            else:
+                step = 2
+
+        elif step == 2:
+            t = (S1*D2 - S2*R) / denominator
+            if t < 0:
+                t = 0
+            elif t > 1:
+                t = 1
+            step = 3
+        
+        elif step == 3:
+            u = (t*R - S2) / D2
+            if u < 0:
+                u = 0
+                step = 4
+            elif u > 1:
+                u = 1
+                step = 4
+            else:
+                step = 5
+
+        elif step == 4:
+            t = (u*R + S1) / D1
+            if t < 0:
+                t = 0
+            elif t > 1:
+                t = 1
+            step = 5
+        
+        elif step == 5:
+            temp_vec = t*d1 - u*d2 - d12
+            MinD_squared = np.dot(temp_vec, temp_vec)
+            found_result = True
+
+    if switch:
+        t, u = u, t  # swap back
+    
+    return MinD_squared,t , u
+
+def Lumelsky(p11, p12, p21, p22):
+    d1 = p12 - p11
+    d2 = p22 - p21
+    d12 = p21 - p11
+
+    D1 = np.dot(d1, d1)
+    D2 = np.dot(d2, d2)
+    R = np.dot(d1, d2)
+    S1 = np.dot(d1, d12)
+    S2 = np.dot(d2, d12)
+    denominator = D1 * D2 - R * R
+
+    # step 1: handle special cases
+    if D1 == 0 and D2 == 0:
+        t = 0
+        u = 0
+    elif D1 == 0:
+        u = 0
+        # Swap d1 <-> d2, D1 <-> D2, S1 <-> S2
+        d1, d2 = d2, d1
+        d12 = -d12
+        D1, D2 = D2, D1
+        S1, S2 = -S2, -S1
+        # step 4
+        t = (u * R + S1) / D1
+        t = np.clip(t, 0, 1)
+
+        t, u = u, t  # swap back
+        d1, d2 = d2, d1
+        d12 = -d12
+    elif D2 == 0:
+        u = 0
+        # step 4
+        t = (u * R + S1) / D1
+        t = np.clip(t, 0, 1)
+    elif denominator == 0:
+        t = 0
+        # step 3
+        u = (t * R - S2) / D2
+        if u < 0 or u > 1:
+            u = np.clip(u, 0, 1)
+            # step 4
+            t = (u * R + S1) / D1
+            t = np.clip(t, 0, 1)
+    else:
+        # step 2
+        t = (S1 * D2 - S2 * R) / denominator
+        t = np.clip(t, 0, 1)
+        # step 3
+        u = (t * R - S2) / D2
+        if u < 0 or u > 1:
+            u = np.clip(u, 0, 1)
+            # step 4
+            t = (u * R + S1) / D1
+            t = np.clip(t, 0, 1)
+
+    temp_vec = t * d1 - u * d2 - d12
+    MinD_squared = np.dot(temp_vec, temp_vec)
+    return MinD_squared, t, u
+
+# ---------- distance: smooth + parallel-safe ----------
+def _Lumelsky() -> ca.Function:
+    """
+    Smooth, CasADi-friendly squared distance between segments [p11,p12] and [p21,p22].
+    - Works for 2D/3D/... (matching dims), SX or MX.
+    - Degenerate (point) and parallel cases handled without branching.
+    - Returns: (d2, t, u, cp1, cp2)
+    """
+    p11 = ca.MX.sym('p11', 3)
+    p12 = ca.MX.sym('p12', 3)
+    p21 = ca.MX.sym('p21', 3)
+    p22 = ca.MX.sym('p22', 3)
+    beta = ca.MX.sym('beta')
+    reg_eps = ca.MX.sym('reg_eps')
+    k_par = ca.MX.sym('k_par')
+    tau = ca.MX.sym('tau')
+
+    d1  = p12 - p11            # segment 1 direction
+    d2  = p22 - p21            # segment 2 direction
+    d12 = p21 - p11
+
+    D1 = ca.dot(d1, d1)        # ||d1||^2
+    D2 = ca.dot(d2, d2)        # ||d2||^2
+    R  = ca.dot(d1, d2)        # d1·d2
+    S1 = ca.dot(d1, d12)       # d1·(p21 - p11)
+    S2 = ca.dot(d2, d12)       # d2·(p21 - p11)
+
+    # Gram determinant (zero when parallel)
+    D = D1*D2 - R*R
+    denom_norm = D1*D2 + reg_eps # normalize with something of similar scale, as D scales with segment lengths. reg_eps to avoid div0 if either segment is a point
+    gamma = D / denom_norm          # ~1 when orthogonal, ~0 when parallel
+
+    # Adaptive Tikhonov (bigger as we get more parallel/degenerate)
+    lam_base = reg_eps * (D1 + D2 + 1.0)
+    lam = lam_base * (1.0 + k_par*(1.0 - gamma))  # ramps up near parallel
+
+    # --- Solve the 2x2 system (regularized), then soft-refine edges (Lumelsky steps 3–4) ---
+    # [ D1   -R ] [ t ] = [ S1 ]
+    # [  R  -(D2)] [ u ]   [ S2 ]   (signs chosen to keep A well-conditioned with lam)
+    A = ca.vertcat(
+        ca.hcat([ D1 + lam,  -R            ]),
+        ca.hcat([ R,          -(D2 + lam)  ])
+    )
+    # inverse einer 2x2 matrix
+    A_inv = (1.0 / (A[0,0]*A[1,1] - A[0,1]*A[1,0])) * ca.vertcat(
+        ca.hcat([ A[1,1], -A[0,1] ]),
+        ca.hcat([ -A[1,0], A[0,0] ])
+    )
+    b = ca.vertcat(S1, S2)
+    sol = A_inv @ b
+    t0, u0 = sol[0], sol[1]
+
+    # Box to [0,1]^2 with your softclip + soft edge re-solves
+    t1 = utils_sym.softclip(t0, 0.0, 1.0, beta)
+    u1 = utils_sym.softclip((t1*R - S2) / (D2 + lam), 0.0, 1.0, beta)
+    t2 = utils_sym.softclip((u1*R + S1) / (D1 + lam), 0.0, 1.0, beta)
+    u2 = utils_sym.softclip((t2*R - S2) / (D2 + lam), 0.0, 1.0, beta)
+
+    # --- Parallel fallback (branch-free) ---
+    # For parallel lines, a stable choice is: project point->segment first, then refine the other.
+    # Using Ericson-like recipe: s = clamp(S1 / D1), then compute u from s.
+    t_par = utils_sym.softclip(S1 / (D1 + lam), 0.0, 1.0, beta)
+    u_par = utils_sym.softclip((t_par*R - S2) / (D2 + lam), 0.0, 1.0, beta)
+    # one refinement back:
+    t_par = utils_sym.softclip((u_par*R + S1) / (D1 + lam), 0.0, 1.0, beta)
+
+    # Smoothly blend toward the parallel fallback as gamma→0.
+    # Weight w_par in [0,1], ~1 when parallel, ~0 when non-parallel.
+    # Using a simple smooth rational: w_par = 1 - gamma / (gamma + τ)
+    w_par = 1.0 - gamma / (gamma + tau)
+
+    t = (1.0 - w_par)*t2 + w_par*t_par
+    u = (1.0 - w_par)*u2 + w_par*u_par
+
+    diff = t * d1 - u * d2 - d12
+    MinD_squared = ca.dot(diff, diff)
+
+    return ca.Function('lumelsky', [p11, p12, p21, p22, beta, reg_eps, k_par, tau], [MinD_squared, t, u]).expand()
+
+def get_bounding_sphere_metrics(obj):
+    p1 = obj['p1']
+    p2 = obj['p2']
+    radius = obj['radius']
+    return p1, p2, radius
 
 def _build_tau_coupling_func() -> ca.Function:
     q = ca.MX.sym('q', N_JOINTS)
@@ -632,6 +854,90 @@ def teardown_for_tests() -> None:
         J_FUN = None
 
 def main():
+
+    # Example: create two line segments in 3D and compute their squared distance using Lumelsky
+
+    # Define segment 1 by points p11 and p12
+    # p11 = np.array([4.0, 4.0, 6.0])
+    # p12 = np.array([4.0, 4.0, 6.0])
+
+    # # Define segment 2 by points p21 and p22
+    # p21 = np.array([1.0, 4.0, 8.0])
+    # p22 = np.array([2.0, 4.0, 8.0])  # degenerate: a point
+
+    p21 = np.array([1.0, 2.0, 3.0])
+    p22 = np.array([2.0, 4.0, 5.0])
+
+    # Segment 2: degenerate point at (0.5, 0.5, 0.0)
+    p11 = np.array([3.0, 2.0, 5.0])
+    p12 = np.array([3.0, 2.0, 5.0])
+    
+
+    lumelsky = _Lumelsky()
+    # Choose plausible parameters for beta (softness), reg_eps (regularization), k_par (parallel penalty)
+    beta = 10.0        # soft clipping sharpness
+    reg_eps = 1e-6     # regularization for degenerate cases
+    k_par = 10.0       # parallel penalty scaling
+    tau = 0.001        # small threshold for parallelism detection (the smaller, the better the accuracy, but more numerical issues)
+
+    # Evaluate the symbolic function with the given points
+    dist2, t, u = lumelsky(p11, p12, p21, p22, beta, reg_eps, k_par, tau)
+    dist2 = float(dist2)
+    t = float(t)
+    u = float(u)
+
+    # die Berechnung von u scheint für die numerischen Fälle nicht zu stimmen, aber für den symbolischen, wenn seg 1 zum Punkt wird
+    # wenn seg 2 zum Punkt wird, ist alles korrekt
+
+    # dist2, t, u = lumelsky(p11, p12, p21, p22, 10, 1e-6, 10)
+
+    # Compute squared distance using Lumelsky
+    dist2, t, u = Lumelsky(p11, p12, p21, p22)
+    print(f"Squared distance between segments: {dist2}")
+    print(f"Distance: {np.sqrt(dist2)}")
+    print(f"t (segment 1 parameter): {t}")
+    print(f"u (segment 2 parameter): {u}")
+
+    import matplotlib.pyplot as plt
+    # Compute closest points on each segment using t and u
+    closest_point_seg1 = p11 + t * (p12 - p11)
+    closest_point_seg2 = p21 + u * (p22 - p21)
+
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Plot segment 1
+    ax.plot([p11[0], p12[0]], [p11[1], p12[1]], [p11[2], p12[2]], 'b-o', label='Segment 1')
+
+    # Plot segment 2
+    ax.plot([p21[0], p22[0]], [p21[1], p22[1]], [p21[2], p22[2]], 'r-o', label='Segment 2')
+
+    # Plot the closest points
+    ax.scatter(*closest_point_seg1, color='g', s=80, label='Closest Point on Segment 1')
+    ax.scatter(*closest_point_seg2, color='m', s=80, label='Closest Point on Segment 2')
+
+    # Draw a line connecting the closest points (minimum distance)
+    ax.plot(
+        [closest_point_seg1[0], closest_point_seg2[0]],
+        [closest_point_seg1[1], closest_point_seg2[1]],
+        [closest_point_seg1[2], closest_point_seg2[2]],
+        'k--', linewidth=2, label='Minimum Distance'
+    )
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Line Segments in 3D')
+    ax.legend()
+    plt.show()
+
+
+
+
+
+
+    return
     bluerov_package_path = get_package_path('bluerov')
     bluerov_params_path = bluerov_package_path + "/config/model_params.yaml"
 
