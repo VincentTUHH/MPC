@@ -144,19 +144,122 @@ def _Lumelsky() -> ca.Function:
     return ca.Function('lumelsky', [p11, p12, p21, p22, beta, reg_eps, k_par, tau], [MinD_squared, t, u]).expand()
 
 
+def _Lumeslky_cases() -> ca.Function:
+    p11 = ca.MX.sym('p11', 3)
+    p12 = ca.MX.sym('p12', 3)
+    p21 = ca.MX.sym('p21', 3)
+    p22 = ca.MX.sym('p22', 3)
+
+    d1  = p12 - p11            # segment 1 direction
+    d2  = p22 - p21            # segment 2 direction
+    d12 = p21 - p11
+
+    D1 = ca.dot(d1, d1)        # ||d1||^2
+    D2 = ca.dot(d2, d2)        # ||d2||^2
+    R  = ca.dot(d1, d2)        # d1·d2
+    S1 = ca.dot(d1, d12)       # d1·(p21 - p11)
+    S2 = ca.dot(d2, d12)       # d2·(p21 - p11)
+    denominator = D1 * D2 - R * R
+
+    switch = ca.if_else(D1 == 0, True, False)
+
+    # CasADi branch-free switching using if_else
+    d1_sw = ca.if_else(switch, d2, d1)
+    d2_sw = ca.if_else(switch, d1, d2)
+    d12_sw = ca.if_else(switch, -d12, d12)
+    D1_sw = ca.if_else(switch, D2, D1)
+    D2_sw = ca.if_else(switch, D1, D2)
+    S1_sw = ca.if_else(switch, -S2, S1)
+    S2_sw = ca.if_else(switch, -S1, S2)
+
+
+    t = ca.if_else(ca.logic_and(D1 == 0, D2 == 0), 0,
+        ca.if_else(denominator == 0, 0, (S1_sw * D2_sw - S2_sw * R) / denominator)
+    )
+
+    t = ca.if_else(t < 0, 0,
+        ca.if_else(t > 1, 1, t)
+    )
+
+    u = ca.if_else(ca.logic_and(D1 == 0, D2 == 0), 0,
+        ca.if_else(D1 == 0, 0,
+            ca.if_else(D2 == 0, 0,
+                ca.if_else(denominator == 0, (t * R - S2_sw) / D2_sw, (t * R - S2_sw) / D2_sw)
+            )
+        )
+    )
+
+    u = ca.if_else(u < 0, 0,
+        ca.if_else(u > 1, 1, u)
+    )
+
+    t = (u * R + S1_sw) / D1_sw
+
+    t = ca.if_else(t < 0, 0,
+        ca.if_else(t > 1, 1, t)
+    )
+
+    # u = ca.if_else(u < 0, 0,
+    #     ca.if_else(u > 1, 1, u)
+    # )
+
+    # t = ca.if_else(t < 0, 0,
+    #     ca.if_else(t > 1, 1, t)
+    # )
+
+    diff = t * d1_sw - u * d2_sw - d12_sw
+    MinD_squared = ca.dot(diff, diff)
+
+    t_sw = ca.if_else(switch, u, t)
+    u_sw = ca.if_else(switch, t, u)
+
+    return ca.Function('lumelsky_cases', [p11, p12, p21, p22], [MinD_squared, t_sw, u_sw]).expand()
+
+
 def main():
+
+
+
+    return ca.Function('lumelsky_cases', [p11, p12, p21, p22], [D1, D2, R, S1, S2]).expand()
+
+
+
+
+
+def main():
+    use_sym_if_else = False
     np.random.seed(42)
     errors = []
     segments = []
 
     lumelsky_sym = _Lumelsky()
 
-    for i in range(10):
+    lumelsky_cases = _Lumeslky_cases()
+
+    for i in range(50):
         # Random segments in 3D
         p11 = np.random.uniform(-5, 5, 3)
         p12 = np.random.uniform(-5, 5, 3)
         p21 = np.random.uniform(-5, 5, 3)
         p22 = np.random.uniform(-5, 5, 3)
+
+        # Add degenerate cases: segment 1 is a point, segment 2 is a point, or both
+        if i <= 10:
+            # Segment 1 is a point
+            p12 = p11.copy()
+        elif i <= 20:
+            # Segment 2 is a point
+            p22 = p21.copy()
+        elif i <= 30:
+            # Both segments are points
+            p12 = p11.copy()
+            p22 = p21.copy()
+        elif i <= 40:
+            # Both segments are parallel
+            direction = np.random.uniform(-1, 1, 3)
+            direction /= np.linalg.norm(direction)
+            p12 = p11 + direction * np.random.uniform(0.1, 5)
+            p22 = p21 + direction * np.random.uniform(0.1, 5)
 
         segments.append((p11, p12, p21, p22))
 
@@ -164,18 +267,22 @@ def main():
         MinD_num, t_num, u_num = Lumelsky(p11, p12, p21, p22)
 
         # Symbolic
-        beta = 10.0
-        reg_eps = 1e-6
-        k_par = 10.0
-        tau = 0.001
-        MinD_sym, t_sym, u_sym = lumelsky_sym(p11, p12, p21, p22, beta, reg_eps, k_par, tau)
-        MinD_sym = float(MinD_sym)
+        if use_sym_if_else:
+            MinD_sym, t_sym, u_sym = lumelsky_cases(p11, p12, p21, p22)
+            MinD_sym = float(MinD_sym)
+        else:
+            beta = 10.0
+            reg_eps = 1e-6
+            k_par = 10.0
+            tau = 0.005
+            MinD_sym, t_sym, u_sym = lumelsky_sym(p11, p12, p21, p22, beta, reg_eps, k_par, tau)
+            MinD_sym = float(MinD_sym)
 
         # print(f"Case {i+1}: Min Distance (numeric) = {np.sqrt(MinD_num):.6f}, Min Distance (symbolic) = {np.sqrt(MinD_sym):.6f}")
         print(f"Case {i+1}: Min Distance (non-squared, numeric) = {MinD_num:.6f}, Min Distance (non-squared, symbolic) = {MinD_sym:.6f}")
 
         # Error (signed)
-        error = MinD_sym - MinD_num
+        error = np.sqrt(MinD_sym) - np.sqrt(MinD_num)
         errors.append(error)
 
     # Plot errors
@@ -196,12 +303,17 @@ def main():
         cp2_num = p21 + u_num * (p22 - p21)
 
         # Symbolic
-        beta = 10.0
-        reg_eps = 1e-6
-        k_par = 10.0
-        MinD_sym, t_sym, u_sym = lumelsky_sym(p11, p12, p21, p22, beta, reg_eps, k_par)
-        t_sym = float(t_sym)
-        u_sym = float(u_sym)
+        if use_sym_if_else:
+            MinD_sym, t_sym, u_sym = lumelsky_cases(p11, p12, p21, p22)
+            t_sym = float(t_sym)
+            u_sym = float(u_sym)
+        else:
+            beta = 10.0
+            reg_eps = 1e-6
+            k_par = 10.0
+            MinD_sym, t_sym, u_sym = lumelsky_sym(p11, p12, p21, p22, beta, reg_eps, k_par, tau)
+            t_sym = float(t_sym)
+            u_sym = float(u_sym)
         cp1_sym = p11 + t_sym * (p12 - p11)
         cp2_sym = p21 + u_sym * (p22 - p21)
 
