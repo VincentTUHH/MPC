@@ -182,18 +182,22 @@ def _Lumelsky() -> ca.Function:
     # --- Solve the 2x2 system (regularized), then soft-refine edges (Lumelsky steps 3–4) ---
     # [ D1   -R ] [ t ] = [ S1 ]
     # [  R  -(D2)] [ u ]   [ S2 ]   (signs chosen to keep A well-conditioned with lam)
-    A = ca.vertcat(
-        ca.hcat([ D1 + lam,  -R            ]),
-        ca.hcat([ R,          -(D2 + lam)  ])
-    )
-    # inverse einer 2x2 matrix
-    A_inv = (1.0 / (A[0,0]*A[1,1] - A[0,1]*A[1,0])) * ca.vertcat(
-        ca.hcat([ A[1,1], -A[0,1] ]),
-        ca.hcat([ -A[1,0], A[0,0] ])
-    )
-    b = ca.vertcat(S1, S2)
-    sol = A_inv @ b
-    t0, u0 = sol[0], sol[1]
+    a = D1 + lam
+    b = -R
+    c =  R
+    d = -(D2 + lam)
+
+    det = a*d - b*c
+    # keep sign, avoid zero determinant
+    det_safe = det + ca.sign(det)*1e-12 + 1e-12
+
+    A_inv_00 =  d / det_safe
+    A_inv_01 = -b / det_safe
+    A_inv_10 = -c / det_safe
+    A_inv_11 =  a / det_safe
+
+    t0 = A_inv_00*S1 + A_inv_01*S2
+    u0 = A_inv_10*S1 + A_inv_11*S2
 
     # Box to [0,1]^2 with your softclip + soft edge re-solves
     t1 = utils_sym.softclip(t0, 0.0, 1.0, beta)
