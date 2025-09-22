@@ -9,23 +9,9 @@ def softplus(x):
     """Numerically stable calculation for log(1 + exp(x)), CasADi symbolic version."""
     return ca.log(1 + ca.exp(x))
 
-def softplus_safe(z, k=8.0):
-    # smooth ReLU ~ (1/k) * log(1 + exp(k z)), but numerically safe
-    # cap argument to avoid exp overflow
-    return (1.0/k) * ca.log1p(ca.exp(ca.fmin(k*z, 40.0)))
-
-
-def softplus_stable(x):
-    """Numerisch stabilere Berechnung für log(1 + exp(x)), CasADi symbolic version."""
-    return ca.fmax(x, 0) + ca.log(1 + ca.exp(-ca.fabs(x)))
-
 def softminus(x):
     """CasADi symbolic version."""
     return -softplus(-x)
-
-def softminus_safe(x):
-    """CasADi symbolic version."""
-    return -softplus_safe(-x)
 
 def softclip(x, a=None, b=None, beta=None):
     """
@@ -36,8 +22,8 @@ def softclip(x, a=None, b=None, beta=None):
     # when clipping at both ends, make beta dimensionless w.r.t. (b - a) / 2
     beta = beta / ((b - a) / 2)
     v = x
-    v = v - softminus_safe(beta * (x - a)) / beta
-    v = v - softplus_safe(beta * (x - b)) / beta
+    v = v - softminus(beta * (x - a)) / beta
+    v = v - softplus(beta * (x - b)) / beta
     return v
 
 def quaternion_rotation(q, v):
