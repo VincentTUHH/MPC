@@ -7,6 +7,7 @@ import casadi as ca
 
 from bluerov import dynamics_symbolic as sym_brv
 from uvms import model as uvms_model
+from uvms import Lumelsky
 
 from manipulator import (
     kinematics as manip_kin,
@@ -18,6 +19,7 @@ from common import utils_math, utils_sym, animate
 from common.my_package_path import get_package_path
 from common import animate
 from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
 
 # -----------------------
 # Global, read-only variables after init()
@@ -39,6 +41,10 @@ EEF_POSE: Optional[ca.Function] = None
 F_SYS: Optional[ca.Function] = None
 STEP: Optional[ca.Function] = None
 ROLLOUT_UNROLLED: Optional[ca.Function] = None
+LUMELSKY: Optional[ca.Function] = None
+LUMELSKY_CASES: Optional[ca.Function] = None
+COLLISION: Optional[ca.Function] = None
+CONSTRAINT_COLLISION: Optional[ca.Function] = None
 
 # Constants/config for fast access
 USE_QUATERNION: bool = False
@@ -65,7 +71,8 @@ D_FUN = None
 G_FUN = None
 J_FUN = None
 
-Q0 = np.array([0.1, np.pi/2, np.pi/2, 0.0])  # Initial joint angles
+# Q0 = np.array([0.1, np.pi/2, np.pi/2, 0.0])  # Initial joint angles
+Q0 = np.array([np.pi, np.pi/2, 3*np.pi/4, np.pi/5])  # Initial joint angles
 POS0 = np.array([0.0, 0.0, 0.0])
 ATT0_EULER = np.array([0.0, 0.0, 0.0])
 ATT0_QUAT = utils_math.euler_to_quat(ATT0_EULER[0], ATT0_EULER[1], ATT0_EULER[2])
@@ -77,237 +84,74 @@ MANIP_PARAMS: Optional[dict] = None
 ALPHA_PARAMS: Optional[dict] = None
 BRV_PARAMS: Optional[dict] = None
 
-def check_collision(obj1, obj2):
-    #obj1 = {'p1': np.array([1.0, 2.0, 3.0]), 'p2': np.array([4.0, 5.0, 6.0]), 'radius': 1.0} # line-swept-sphere
-    #obj2 = {'p1': np.array([2.0, 4.0, 8.0]), 'p2': np.array([2.0, 4.0, 8.0]), 'radius': 1.0} # point-swept-sphere
+def _constraint_collision(collision_test: ca.Function) -> ca.Function:
+    p_vehicle = ca.MX.sym('p_vehicle', 3)
+    att_vehicle = ca.MX.sym('att_vehicle', 4) # quaternion [w,x,y,z]
+    p_eef = ca.MX.sym('p_eef', 3)
+    att_eef = ca.MX.sym('att_eef', 4) # quaternion [w,x,y,z]
 
-    # extract points and pass to Lumelsky
-    # add radii for distance of bounding volumes
-    pass
+    # Self-Collision vehicle - underarm
+    radius_vehicle = ca.DM(0.245) # meters
+    radius_underarm = ca.DM(0.025) # meters
 
-def Lumelsky_old(p11, p12, p21, p22):
-    d1 = p12 - p11
-    d2 = p22 - p21
-    d12 = p21 - p11
+    # p_eef_offset = ca.DM([0.03, 0.0, 0.0])
+    # p_elbow_offset = ca.DM([-0.18, 0.0, 0.0])
+    p_vehicle_offset = ca.DM([-0.003, 0.0, 0.022])
+    p_vehicle_pill_offset = ca.DM([0.0, 0.1375, 0.0]) # offset to pill end points left and right (L=0.275m/2)
+    safety_margin = ca.DM(0.05) # meters
+    p_unit = ca.DM([1.0, 0.0, 0.0])
 
-    D1 = np.dot(d1, d1)  # squared 2-norm of d1
-    D2 = np.dot(d2, d2)  # squared 2-norm of d2
-    R = np.dot(d1, d2)
-    S1 = np.dot(d1, d12)
-    S2 = np.dot(d2, d12)
+    # p_underarm1 = p_eef + utils_sym.quaternion_rotation(att_eef, p_eef_offset)
+    # p_underarm2 = p_eef + utils_sym.quaternion_rotation(att_eef, p_elbow_offset)
 
-    denominator = D1 * D2 - R * R
+    p_unit_rot = utils_sym.quaternion_rotation(att_eef, p_unit)
+    p_underarm1 = p_eef + p_unit_rot * 0.03
+    p_underarm2 = p_eef - p_unit_rot * 0.18
 
-    step = 1
-    found_result = False
-    switch = False
+    pill_offset = utils_sym.quaternion_rotation(att_vehicle, p_vehicle_pill_offset)
+    vehicle_offset = utils_sym.quaternion_rotation(att_vehicle, p_vehicle_offset)
+    p_vehicle1 = p_vehicle + vehicle_offset - pill_offset
+    p_vehicle2 = p_vehicle + vehicle_offset + pill_offset
 
-    while not found_result:
+    obj1 = ca.vertcat(p_vehicle1, p_vehicle2, radius_vehicle)
+    obj2 = ca.vertcat(p_underarm1, p_underarm2, radius_underarm)
 
-        if step == 1:
-            if D1 == 0:
-                u = 0
-                # Swap d1 <-> d2, D1 <-> D2, S1 <-> S2
-                switch = True
-                d1, d2 = d2, d1
-                d12 = -d12
-                D1, D2 = D2, D1
-                S1, S2 = -S2, -S1
-                step = 4
-            elif D2 == 0:
-                u = 0
-                step = 4
-            elif D1 == 0 and D2 == 0:
-                u = 0
-                t = 0
-                step = 5
-            elif D1 != 0 and D2 != 0 and denominator == 0:
-                t = 0
-                step = 3
-            else:
-                step = 2
+    g_no_collision = collision_test(obj1, obj2, safety_margin) # >= 0 means no collision
 
-        elif step == 2:
-            t = (S1*D2 - S2*R) / denominator
-            if t < 0:
-                t = 0
-            elif t > 1:
-                t = 1
-            step = 3
-        
-        elif step == 3:
-            u = (t*R - S2) / D2
-            if u < 0:
-                u = 0
-                step = 4
-            elif u > 1:
-                u = 1
-                step = 4
-            else:
-                step = 5
+    # g_no_collision = ca.dot(p_vehicle - p_eef, p_vehicle - p_eef)
 
-        elif step == 4:
-            t = (u*R + S1) / D1
-            if t < 0:
-                t = 0
-            elif t > 1:
-                t = 1
-            step = 5
-        
-        elif step == 5:
-            temp_vec = t*d1 - u*d2 - d12
-            MinD_squared = np.dot(temp_vec, temp_vec)
-            found_result = True
-
-    if switch:
-        t, u = u, t  # swap back
+    return ca.Function('constraint_collision', [p_vehicle, att_vehicle, p_eef, att_eef], [g_no_collision, obj1, obj2]).expand()
     
-    return MinD_squared,t , u
+def _check_collision(lumelsky_fun: ca.Function) -> ca.Function:
+    # obj1 = [p1, p2, radius1] # swept-sphere
+    # obj2 = [p3, p4, radius2] # swept-sphere
+    obj1 = ca.MX.sym('obj1', 7)
+    obj2 = ca.MX.sym('obj2', 7)
+    safety_margin = ca.MX.sym('safety_margin', 1) # in meters
 
-def Lumelsky(p11, p12, p21, p22):
-    d1 = p12 - p11
-    d2 = p22 - p21
-    d12 = p21 - p11
+    # Segment 1
+    p11 = obj1[0:3]      # Start point of segment 1 (3D)
+    p12 = obj1[3:6]      # End point of segment 1 (3D)
+    radius1 = obj1[6]    # Radius of segment 1
 
-    D1 = np.dot(d1, d1)
-    D2 = np.dot(d2, d2)
-    R = np.dot(d1, d2)
-    S1 = np.dot(d1, d12)
-    S2 = np.dot(d2, d12)
-    denominator = D1 * D2 - R * R
+    # Segment 2
+    p21 = obj2[0:3]      # Start point of segment 2 (3D)
+    p22 = obj2[3:6]      # End point of segment 2 (3D)
+    radius2 = obj2[6]    # Radius of segment 2
 
-    # step 1: handle special cases
-    if D1 == 0 and D2 == 0:
-        t = 0
-        u = 0
-    elif D1 == 0:
-        u = 0
-        # Swap d1 <-> d2, D1 <-> D2, S1 <-> S2
-        d1, d2 = d2, d1
-        d12 = -d12
-        D1, D2 = D2, D1
-        S1, S2 = -S2, -S1
-        # step 4
-        t = (u * R + S1) / D1
-        t = np.clip(t, 0, 1)
+    beta = 20.0 # softclip sharpness. higher = closer to hard clamp, but sharper gradients
+    reg_eps = 1e-6 # scale with segment lengths
+    k_par = 10.0 # how aggressively to regularize near parallelism
+    tau = 0.005 # blend width into the parallel fallback
 
-        t, u = u, t  # swap back
-        d1, d2 = d2, d1
-        d12 = -d12
-    elif D2 == 0:
-        u = 0
-        # step 4
-        t = (u * R + S1) / D1
-        t = np.clip(t, 0, 1)
-    elif denominator == 0:
-        t = 0
-        # step 3
-        u = (t * R - S2) / D2
-        if u < 0 or u > 1:
-            u = np.clip(u, 0, 1)
-            # step 4
-            t = (u * R + S1) / D1
-            t = np.clip(t, 0, 1)
-    else:
-        # step 2
-        t = (S1 * D2 - S2 * R) / denominator
-        t = np.clip(t, 0, 1)
-        # step 3
-        u = (t * R - S2) / D2
-        if u < 0 or u > 1:
-            u = np.clip(u, 0, 1)
-            # step 4
-            t = (u * R + S1) / D1
-            t = np.clip(t, 0, 1)
+    # d2, _, _ = lumelsky_fun(p11, p12, p21, p22, beta, reg_eps, k_par, tau)
+    d2, _, _ = lumelsky_fun(p11, p12, p21, p22)
 
-    temp_vec = t * d1 - u * d2 - d12
-    MinD_squared = np.dot(temp_vec, temp_vec)
-    return MinD_squared, t, u
+    r_sum = radius1 + radius2
 
-# ---------- distance: smooth + parallel-safe ----------
-def _Lumelsky() -> ca.Function:
-    """
-    Smooth, CasADi-friendly squared distance between segments [p11,p12] and [p21,p22].
-    - Works for 2D/3D/... (matching dims), SX or MX.
-    - Degenerate (point) and parallel cases handled without branching.
-    - Returns: (d2, t, u, cp1, cp2)
-    """
-    p11 = ca.MX.sym('p11', 3)
-    p12 = ca.MX.sym('p12', 3)
-    p21 = ca.MX.sym('p21', 3)
-    p22 = ca.MX.sym('p22', 3)
-    beta = ca.MX.sym('beta')
-    reg_eps = ca.MX.sym('reg_eps')
-    k_par = ca.MX.sym('k_par')
-    tau = ca.MX.sym('tau')
+    g_no_collision = d2 - (safety_margin + r_sum)**2 # >= 0 means no collision
 
-    d1  = p12 - p11            # segment 1 direction
-    d2  = p22 - p21            # segment 2 direction
-    d12 = p21 - p11
-
-    D1 = ca.dot(d1, d1)        # ||d1||^2
-    D2 = ca.dot(d2, d2)        # ||d2||^2
-    R  = ca.dot(d1, d2)        # d1·d2
-    S1 = ca.dot(d1, d12)       # d1·(p21 - p11)
-    S2 = ca.dot(d2, d12)       # d2·(p21 - p11)
-
-    # Gram determinant (zero when parallel)
-    D = D1*D2 - R*R
-    denom_norm = D1*D2 + reg_eps # normalize with something of similar scale, as D scales with segment lengths. reg_eps to avoid div0 if either segment is a point
-    gamma = D / denom_norm          # ~1 when orthogonal, ~0 when parallel
-
-    # Adaptive Tikhonov (bigger as we get more parallel/degenerate)
-    lam_base = reg_eps * (D1 + D2 + 1.0)
-    lam = lam_base * (1.0 + k_par*(1.0 - gamma))  # ramps up near parallel
-
-    # --- Solve the 2x2 system (regularized), then soft-refine edges (Lumelsky steps 3–4) ---
-    # [ D1   -R ] [ t ] = [ S1 ]
-    # [  R  -(D2)] [ u ]   [ S2 ]   (signs chosen to keep A well-conditioned with lam)
-    A = ca.vertcat(
-        ca.hcat([ D1 + lam,  -R            ]),
-        ca.hcat([ R,          -(D2 + lam)  ])
-    )
-    # inverse einer 2x2 matrix
-    A_inv = (1.0 / (A[0,0]*A[1,1] - A[0,1]*A[1,0])) * ca.vertcat(
-        ca.hcat([ A[1,1], -A[0,1] ]),
-        ca.hcat([ -A[1,0], A[0,0] ])
-    )
-    b = ca.vertcat(S1, S2)
-    sol = A_inv @ b
-    t0, u0 = sol[0], sol[1]
-
-    # Box to [0,1]^2 with your softclip + soft edge re-solves
-    t1 = utils_sym.softclip(t0, 0.0, 1.0, beta)
-    u1 = utils_sym.softclip((t1*R - S2) / (D2 + lam), 0.0, 1.0, beta)
-    t2 = utils_sym.softclip((u1*R + S1) / (D1 + lam), 0.0, 1.0, beta)
-    u2 = utils_sym.softclip((t2*R - S2) / (D2 + lam), 0.0, 1.0, beta)
-
-    # --- Parallel fallback (branch-free) ---
-    # For parallel lines, a stable choice is: project point->segment first, then refine the other.
-    # Using Ericson-like recipe: s = clamp(S1 / D1), then compute u from s.
-    t_par = utils_sym.softclip(S1 / (D1 + lam), 0.0, 1.0, beta)
-    u_par = utils_sym.softclip((t_par*R - S2) / (D2 + lam), 0.0, 1.0, beta)
-    # one refinement back:
-    t_par = utils_sym.softclip((u_par*R + S1) / (D1 + lam), 0.0, 1.0, beta)
-
-    # Smoothly blend toward the parallel fallback as gamma→0.
-    # Weight w_par in [0,1], ~1 when parallel, ~0 when non-parallel.
-    # Using a simple smooth rational: w_par = 1 - gamma / (gamma + τ)
-    w_par = 1.0 - gamma / (gamma + tau)
-
-    t = (1.0 - w_par)*t2 + w_par*t_par
-    u = (1.0 - w_par)*u2 + w_par*u_par
-
-    diff = t * d1 - u * d2 - d12
-    MinD_squared = ca.dot(diff, diff)
-
-    return ca.Function('lumelsky', [p11, p12, p21, p22, beta, reg_eps, k_par, tau], [MinD_squared, t, u]).expand()
-
-def get_bounding_sphere_metrics(obj):
-    p1 = obj['p1']
-    p2 = obj['p2']
-    radius = obj['radius']
-    return p1, p2, radius
+    return ca.Function('collision_check', [obj1, obj2, safety_margin], [g_no_collision]).expand()
 
 def _build_tau_coupling_func() -> ca.Function:
     q = ca.MX.sym('q', N_JOINTS)
@@ -542,8 +386,13 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
 
         pos_err_eef = veh_pos_ref - p_eef
 
+        q_goal = ca.DM([1.0, 0.0, 0.0, 0.0]) # desired quaternion (no rotation)
+        q_current = att_eef
+        q_error = utils_sym.quaternion_error(q_goal, q_current)
+
         # cost += pos_err.T @ Qpos @ pos_err
         cost += pos_err_eef.T @ Qpos @ pos_err_eef
+        # cost += q_error.T  @ Qpos @ q_error
         cost += nu_k.T   @ Qvel @ nu_k
         cost += uk.T     @ R    @ uk
         cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
@@ -559,6 +408,15 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         # Joint velocity limits constraints
         opti.subject_to(X[:N_JOINTS, k] <= JOINT_LIMITS[1, :N_JOINTS])
         opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :N_JOINTS])
+
+        # Collision avoidance
+        p_vehicle = xk[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3]
+        att_vehicle = xk[N_JOINTS+N_DOF+3 : N_JOINTS+N_DOF+7]
+
+        # print(CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef))
+        g_collision, _, _ = CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef)
+
+        opti.subject_to(g_collision >= 0)
 
         u_prev = uk
         dnu_g  = dnu_k
@@ -628,7 +486,8 @@ def solve_cftoc(
         return Xv, Uv, Jv, lamg
     except RuntimeError:
         # Optional: inspect infeasibility here
-        return np.zeros((STATE_DIM, N_HORIZON+1)), np.zeros((CTRL_DIM, N_HORIZON)), 1e6
+        print("RuntimeError in solver")
+        return np.zeros((STATE_DIM, N_HORIZON+1)), np.zeros((CTRL_DIM, N_HORIZON)), 1e6, None
     
 # def task_eef_tracking():
 #     pass
@@ -783,7 +642,7 @@ def init_uvms_model(
     fixed_point_iter: int = 2,
     n_horizon: int = 10
 ) -> None:
-    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED
+    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED, LUMELSKY, LUMELSKY_CASES, COLLISION, CONSTRAINT_COLLISION
     global USE_QUATERNION, USE_PWM, USE_FIXED_POINT, FIXED_POINT_ITER, N_HORIZON, V_BAT, L, MIXER, M_INV, JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, INTEGRATOR, N_DOF, N_JOINTS, STATE_DIM, CTRL_DIM, C_FUN, D_FUN, G_FUN, J_FUN
     global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, MANIP_KIN_REAL
     global MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS
@@ -834,6 +693,10 @@ def init_uvms_model(
         F_SYS = _build_f_sys(TAU_COUPLING, DYN_FOSSEN, EEF_POSE, J_EEF)
         STEP = _build_step_func(F_SYS)
         ROLLOUT_UNROLLED = _build_rollout_unrolled(STEP, N_HORIZON)
+        LUMELSKY = Lumelsky._Lumelsky()
+        LUMELSKY_CASES = Lumelsky._Lumelsky_cases()
+        COLLISION = _check_collision(LUMELSKY_CASES)
+        CONSTRAINT_COLLISION = _constraint_collision(COLLISION)
 
         INITIALIZED = True
 
@@ -854,90 +717,6 @@ def teardown_for_tests() -> None:
         J_FUN = None
 
 def main():
-
-    # Example: create two line segments in 3D and compute their squared distance using Lumelsky
-
-    # Define segment 1 by points p11 and p12
-    # p11 = np.array([4.0, 4.0, 6.0])
-    # p12 = np.array([4.0, 4.0, 6.0])
-
-    # # Define segment 2 by points p21 and p22
-    # p21 = np.array([1.0, 4.0, 8.0])
-    # p22 = np.array([2.0, 4.0, 8.0])  # degenerate: a point
-
-    p21 = np.array([1.0, 2.0, 3.0])
-    p22 = np.array([2.0, 4.0, 5.0])
-
-    # Segment 2: degenerate point at (0.5, 0.5, 0.0)
-    p11 = np.array([3.0, 2.0, 5.0])
-    p12 = np.array([3.0, 2.0, 5.0])
-    
-
-    lumelsky = _Lumelsky()
-    # Choose plausible parameters for beta (softness), reg_eps (regularization), k_par (parallel penalty)
-    beta = 10.0        # soft clipping sharpness
-    reg_eps = 1e-6     # regularization for degenerate cases
-    k_par = 10.0       # parallel penalty scaling
-    tau = 0.001        # small threshold for parallelism detection (the smaller, the better the accuracy, but more numerical issues)
-
-    # Evaluate the symbolic function with the given points
-    dist2, t, u = lumelsky(p11, p12, p21, p22, beta, reg_eps, k_par, tau)
-    dist2 = float(dist2)
-    t = float(t)
-    u = float(u)
-
-    # die Berechnung von u scheint für die numerischen Fälle nicht zu stimmen, aber für den symbolischen, wenn seg 1 zum Punkt wird
-    # wenn seg 2 zum Punkt wird, ist alles korrekt
-
-    # dist2, t, u = lumelsky(p11, p12, p21, p22, 10, 1e-6, 10)
-
-    # Compute squared distance using Lumelsky
-    dist2, t, u = Lumelsky(p11, p12, p21, p22)
-    print(f"Squared distance between segments: {dist2}")
-    print(f"Distance: {np.sqrt(dist2)}")
-    print(f"t (segment 1 parameter): {t}")
-    print(f"u (segment 2 parameter): {u}")
-
-    import matplotlib.pyplot as plt
-    # Compute closest points on each segment using t and u
-    closest_point_seg1 = p11 + t * (p12 - p11)
-    closest_point_seg2 = p21 + u * (p22 - p21)
-
-    
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-
-    # Plot segment 1
-    ax.plot([p11[0], p12[0]], [p11[1], p12[1]], [p11[2], p12[2]], 'b-o', label='Segment 1')
-
-    # Plot segment 2
-    ax.plot([p21[0], p22[0]], [p21[1], p22[1]], [p21[2], p22[2]], 'r-o', label='Segment 2')
-
-    # Plot the closest points
-    ax.scatter(*closest_point_seg1, color='g', s=80, label='Closest Point on Segment 1')
-    ax.scatter(*closest_point_seg2, color='m', s=80, label='Closest Point on Segment 2')
-
-    # Draw a line connecting the closest points (minimum distance)
-    ax.plot(
-        [closest_point_seg1[0], closest_point_seg2[0]],
-        [closest_point_seg1[1], closest_point_seg2[1]],
-        [closest_point_seg1[2], closest_point_seg2[2]],
-        'k--', linewidth=2, label='Minimum Distance'
-    )
-
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title('Line Segments in 3D')
-    ax.legend()
-    plt.show()
-
-
-
-
-
-
-    return
     bluerov_package_path = get_package_path('bluerov')
     bluerov_params_path = bluerov_package_path + "/config/model_params.yaml"
 
@@ -970,7 +749,8 @@ def main():
     dt = 0.05 # sampling [s]
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
-    veh_pos_ref_val = np.array([0.8, 0.0, -0.1])  # desired vehicle position for station-keeping
+    # veh_pos_ref_val = np.array([0.8, 0.0, -0.1])  # desired vehicle position for station-keeping
+    veh_pos_ref_val = np.array([0.0, 0.0, -0.1])  # desired vehicle position for station-keeping
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}
@@ -1069,9 +849,9 @@ def main():
     
     R_B_0 = MANIP_DYN.R_reference
     r_B_0 = MANIP_DYN.tf_vec
-    animate.animate_uvms_from_state(X_real, MANIP_PARAMS, R_B_0, r_B_0, dt)
-    
-    import matplotlib.pyplot as plt
+
+    # animate.animate_uvms_from_state(X_real, MANIP_PARAMS, R_B_0, r_B_0, dt)
+    animate.animate_uvms_with_bounding_spheres(X_real, MANIP_PARAMS, R_B_0, r_B_0, dt, CONSTRAINT_COLLISION)
 
     # Extract vehicle position history from X_real
     eta_start = N_JOINTS + N_DOF
