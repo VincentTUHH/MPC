@@ -40,6 +40,27 @@ def softclip(x, a=None, b=None, beta=None):
     v = v - softplus_safe(beta * (x - b)) / beta
     return v
 
+def quaternion_rotation(q, v):
+    """
+    Rotate vector v by unit quaternion q using CasADi.
+    v_new = R(q) * v
+    where v is treated as a pure quaternion [0, v_x, v_y, v_z]
+
+    Args:
+        q: CasADi DM or SX, shape (4,) quaternion [w, x, y, z]
+        v: CasADi DM or SX, shape (3,) vector
+
+    Returns:
+        Rotated vector, shape (3,)
+    """
+    w = q[0]
+    u = q[1:4]  # vector part of quaternion
+
+    t = 2 * skew(u) @ v
+    v_rot = v + w * t + skew(u) @ t
+
+    return v_rot
+
 def rotation_matrix_from_quat(quat):
     """
     Convert quaternion [w, x, y, z] to rotation matrix (3x3).
