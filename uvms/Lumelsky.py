@@ -4,6 +4,85 @@ from common import utils_sym
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
 
+def Lumelsky_old(p11, p12, p21, p22):
+    d1 = p12 - p11
+    d2 = p22 - p21
+    d12 = p21 - p11
+
+    D1 = np.dot(d1, d1)  # squared 2-norm of d1
+    D2 = np.dot(d2, d2)  # squared 2-norm of d2
+    R = np.dot(d1, d2)
+    S1 = np.dot(d1, d12)
+    S2 = np.dot(d2, d12)
+
+    denominator = D1 * D2 - R * R
+
+    step = 1
+    found_result = False
+    switch = False
+
+    while not found_result:
+
+        if step == 1:
+            if D1 == 0:
+                u = 0
+                # Swap d1 <-> d2, D1 <-> D2, S1 <-> S2
+                switch = True
+                d1, d2 = d2, d1
+                d12 = -d12
+                D1, D2 = D2, D1
+                S1, S2 = -S2, -S1
+                step = 4
+            elif D2 == 0:
+                u = 0
+                step = 4
+            elif D1 == 0 and D2 == 0:
+                u = 0
+                t = 0
+                step = 5
+            elif D1 != 0 and D2 != 0 and denominator == 0:
+                t = 0
+                step = 3
+            else:
+                step = 2
+
+        elif step == 2:
+            t = (S1*D2 - S2*R) / denominator
+            if t < 0:
+                t = 0
+            elif t > 1:
+                t = 1
+            step = 3
+        
+        elif step == 3:
+            u = (t*R - S2) / D2
+            if u < 0:
+                u = 0
+                step = 4
+            elif u > 1:
+                u = 1
+                step = 4
+            else:
+                step = 5
+
+        elif step == 4:
+            t = (u*R + S1) / D1
+            if t < 0:
+                t = 0
+            elif t > 1:
+                t = 1
+            step = 5
+        
+        elif step == 5:
+            temp_vec = t*d1 - u*d2 - d12
+            MinD_squared = np.dot(temp_vec, temp_vec)
+            found_result = True
+
+    if switch:
+        t, u = u, t  # swap back
+    
+    return MinD_squared,t , u
+
 def Lumelsky(p11, p12, p21, p22):
     d1 = p12 - p11
     d2 = p22 - p21
