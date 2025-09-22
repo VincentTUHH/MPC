@@ -94,50 +94,80 @@ def plot_joint_angles(q_traj):
     axes[-1].set_xlabel('Timestep')
     plt.tight_layout()
 
+def plot_vehicle(ax, eta, box_size):
+    """Draws a vehicle box and axes at pose eta."""
+    pos = eta[:3]
+    phi, theta, psi = eta[3:6]
+    rot = R.from_euler('zyx', [psi, theta, phi]).as_matrix()
+    l, w, h = box_size
+    corners = np.array([
+        [ l/2,  w/2, -h/2],
+        [ l/2, -w/2, -h/2],
+        [-l/2, -w/2, -h/2],
+        [-l/2,  w/2, -h/2],
+        [ l/2,  w/2,  h/2],
+        [ l/2, -w/2,  h/2],
+        [-l/2, -w/2,  h/2],
+        [-l/2,  w/2,  h/2]
+    ])
+    corners_world = (rot @ corners.T).T + pos
+    box_lines = [
+        [0,1],[1,2],[2,3],[3,0],
+        [4,5],[5,6],[6,7],[7,4],
+        [0,4],[1,5],[2,6],[3,7]
+    ]
+    for i,j in box_lines:
+        ax.plot(*zip(corners_world[i], corners_world[j]), color='b')
+    ax.scatter(*pos, color='r', s=40, label='CoG')
+    axis_len = 0.3
+    origin = pos
+    x_axis = origin + rot @ np.array([axis_len, 0, 0])
+    y_axis = origin + rot @ np.array([0, axis_len, 0])
+    z_axis = origin + rot @ np.array([0, 0, axis_len])
+    ax.plot(*zip(origin, x_axis), color='r')
+    ax.plot(*zip(origin, y_axis), color='g')
+    ax.plot(*zip(origin, z_axis), color='b')
+
+def plot_eef_frame(ax, origin, quat, axis_len=0.1):
+    """Draws EEF axes at origin, orientation given by quaternion [w, x, y, z]."""
+    rot = R.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_matrix()
+    x_axis = origin + rot @ np.array([axis_len, 0, 0])
+    y_axis = origin + rot @ np.array([0, axis_len, 0])
+    z_axis = origin + rot @ np.array([0, 0, axis_len])
+    ax.plot(*zip(origin, x_axis), color='r', lw=2)
+    ax.plot(*zip(origin, y_axis), color='g', lw=2)
+    ax.plot(*zip(origin, z_axis), color='b', lw=2)
+
+def plot_lss(ax, obj, color='m', alpha=0.3):
+    """Draws a line swept sphere (LSS) object."""
+    p1 = np.array(obj[:3])
+    p2 = np.array(obj[3:6])
+    r = obj[6]
+    ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], color=color, lw=2, label='LSS Line')
+    u, v = np.mgrid[0:2*np.pi:20j, 0:np.pi:10j]
+    for center in [p1, p2]:
+        x = center[0] + r * np.cos(u) * np.sin(v)
+        y = center[1] + r * np.sin(u) * np.sin(v)
+        z = center[2] + r * np.cos(v)
+        ax.plot_surface(x, y, z, color=color, alpha=alpha, linewidth=0)
+    v_dir = p2 - p1
+    length = np.linalg.norm(v_dir)
+    if length > 1e-6:
+        v_dir = v_dir / length
+        not_v = np.array([1, 0, 0]) if abs(v_dir[0]) < 0.99 else np.array([0, 1, 0])
+        n1 = np.cross(v_dir, not_v)
+        n1 /= np.linalg.norm(n1)
+        n2 = np.cross(v_dir, n1)
+        t = np.linspace(0, length, 20)
+        theta = np.linspace(0, 2*np.pi, 20)
+        t, theta = np.meshgrid(t, theta)
+        X = p1[0] + v_dir[0]*t + r*np.cos(theta)*n1[0] + r*np.sin(theta)*n2[0]
+        Y = p1[1] + v_dir[1]*t + r*np.cos(theta)*n1[1] + r*np.sin(theta)*n2[1]
+        Z = p1[2] + v_dir[2]*t + r*np.cos(theta)*n1[2] + r*np.sin(theta)*n2[2]
+        ax.plot_surface(X, Y, Z, color=color, alpha=alpha, linewidth=0)
 
 def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
-    '''Animate the trajectory of a BlueROV vehicle in 3D space.
-    Parameters:
-    - eta_all: np.ndarray of shape (n_steps, 6) containing the state
-      [x, y, z, phi, theta, psi] for each timestep.
-    - dt: float, time step duration in seconds.
-    - box_size: tuple of floats (length, width, height) representing the
-      dimensions of the vehicle's bounding box.
-    '''
-    
-    def plot_vehicle(ax, eta, box_size):
-        pos = eta[:3]
-        phi, theta, psi = eta[3:6]
-        rot = R.from_euler('zyx', [psi, theta, phi]).as_matrix()
-        l, w, h = box_size
-        corners = np.array([
-            [ l/2,  w/2, -h/2],
-            [ l/2, -w/2, -h/2],
-            [-l/2, -w/2, -h/2],
-            [-l/2,  w/2, -h/2],
-            [ l/2,  w/2,  h/2],
-            [ l/2, -w/2,  h/2],
-            [-l/2, -w/2,  h/2],
-            [-l/2,  w/2,  h/2]
-        ])
-        corners_world = (rot @ corners.T).T + pos
-        box_lines = [
-            [0,1],[1,2],[2,3],[3,0],
-            [4,5],[5,6],[6,7],[7,4],
-            [0,4],[1,5],[2,6],[3,7]
-        ]
-        for i,j in box_lines:
-            ax.plot(*zip(corners_world[i], corners_world[j]), color='b')
-        ax.scatter(*pos, color='r', s=40, label='CoG')
-        axis_len = 0.3
-        origin = pos
-        x_axis = origin + rot @ np.array([axis_len, 0, 0])
-        y_axis = origin + rot @ np.array([0, axis_len, 0])
-        z_axis = origin + rot @ np.array([0, 0, axis_len])
-        ax.plot(*zip(origin, x_axis), color='r')
-        ax.plot(*zip(origin, y_axis), color='g')
-        ax.plot(*zip(origin, z_axis), color='b')
-
+    '''Animate the trajectory of a BlueROV vehicle in 3D space.'''
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     ax.set_xlim([-1, 1])
@@ -152,6 +182,9 @@ def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
         ax.set_xlim([-2, 2])
         ax.set_ylim([-2, 2])
         ax.set_zlim([-2, 1])
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
         legend_elements = [
             Line2D([0], [0], color='r', lw=2, label='X axis'),
             Line2D([0], [0], color='g', lw=2, label='Y axis'),
@@ -159,113 +192,50 @@ def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
             Line2D([0], [0], marker='o', color='w', markerfacecolor='r', markersize=8, label='CoG')
         ]
         ax.legend(handles=legend_elements, loc='upper left')
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
         plot_vehicle(ax, eta_all[frame], box_size=box_size)
         ax.set_title(f"Step {frame} (t={frame*dt:.2f}s)")
 
     ani = FuncAnimation(fig, update, frames=eta_all.shape[0], interval=dt*1000)
     plt.show()
 
-def animate_uvms_from_state(X_all, manip_params, R_B_0, r_B_0, dt, box_size=(0.4571, 0.575, 0.2539)):
+def animate_uvms_with_bounding_spheres(X_all, manip_params, R_B_0, r_B_0, dt, collision_func, box_size=(0.4571, 0.575, 0.2539)):
     """
-    Animate the trajectory of a UVMS (vehicle + manipulator) in 3D space from state trajectory X_all.
-    - X_all: (n_steps, N_state) state trajectory, first N_JOINTS are joint positions, last 7 are vehicle pose (xyz + quaternion)
-    - DH_table: Denavit-Hartenberg table for manipulator kinematics
-    - dt: sampling time
-    - box_size: vehicle bounding box dimensions
+    Animate the UVMS (vehicle + manipulator) and two line swept spheres (LSS) in 3D space.
     """
     n_steps = X_all.shape[1]
-
-    # Extract joint positions and vehicle pose
-    eta_all = []
-    all_links = []
-
     kin = manip_kin.Kinematics(manip_params)
     n_joints = kin.n_joints
+    eta_all, all_links, lumelsky_data, obj1_data, obj2_data, eef_att_all = [], [], [], [], [], []
     for i in range(n_steps):
         q = X_all[:n_joints, i]
         eta = X_all[-7:, i]
         pos_veh = eta[:3]
-        quat_veh = eta[3:]  # [qw, qx, qy, qz] or [qx, qy, qz, qw] depending on convention
+        quat_veh = eta[3:]
         euler = utils_math.quat_to_euler(quat_veh)
-
         kin.update(q)
         R_I_B = utils_math.rotation_matrix_from_quat(quat_veh)
-
-        # Get manipulator joint positions in manipulator base frame
         joint_positions = [pos_veh + R_I_B @ r_B_0]
         for idx in range(n_joints + 1):
             link_pos = kin.get_link_position(idx)
-            link_pos = np.squeeze(link_pos)  # Remove singleton dimension if present
+            link_pos = np.squeeze(link_pos)
             joint_positions.append(joint_positions[0] + R_I_B @ R_B_0 @ link_pos)
         joint_positions = np.array(joint_positions)
-        joint_positions = np.squeeze(joint_positions)  # Remove singleton dimension if present
+        joint_positions = np.squeeze(joint_positions)
         all_links.append(joint_positions)
-
         eta_euler = np.concatenate((pos_veh, euler))
         eta_all.append(eta_euler)
-
+        eef_quat = np.squeeze(utils_math.rotation_matrix_to_quaternion(R_I_B @ R_B_0 @ utils_math.rotation_matrix_from_quat(kin.get_eef_attitude())))
+        eef_pos = pos_veh + R_I_B @ r_B_0 + R_I_B @ R_B_0 @ kin.get_eef_position()
+        eef_att_all.append(eef_quat)
+        lumelsky_result, obj1, obj2 = collision_func(pos_veh, quat_veh, eef_pos, eef_quat)
+        lumelsky_data.append(np.squeeze(np.array(lumelsky_result)))
+        obj1_data.append(np.squeeze(np.array(obj1)))
+        obj2_data.append(np.squeeze(np.array(obj2)))
     eta_all = np.array(eta_all)
     all_links = np.array(all_links)
-
-    # Call original animate_uvms
-    animate_uvms(eta_all, all_links, dt, box_size=box_size)
-
-def animate_uvms(eta_all, all_links, dt, box_size=(0.4571, 0.575, 0.2539)):
-    """
-    Animate the trajectory of a UVMS (vehicle + manipulator) in 3D space.
-    - eta_all: (n_steps, 6) vehicle pose [x, y, z, phi, theta, psi]
-    - all_links: (n_steps, n_links, 3) manipulator joint positions in world frame
-    - dt: sampling time
-    - box_size: vehicle bounding box dimensions
-    """
-
-    def plot_vehicle(ax, eta, box_size):
-        pos = eta[:3]
-        phi, theta, psi = eta[3:6]
-        rot = R.from_euler('zyx', [psi, theta, phi]).as_matrix()
-        l, w, h = box_size
-        corners = np.array([
-            [ l/2,  w/2, -h/2],
-            [ l/2, -w/2, -h/2],
-            [-l/2, -w/2, -h/2],
-            [-l/2,  w/2, -h/2],
-            [ l/2,  w/2,  h/2],
-            [ l/2, -w/2,  h/2],
-            [-l/2, -w/2,  h/2],
-            [-l/2,  w/2,  h/2]
-        ])
-        corners_world = (rot @ corners.T).T + pos
-        box_lines = [
-            [0,1],[1,2],[2,3],[3,0],
-            [4,5],[5,6],[6,7],[7,4],
-            [0,4],[1,5],[2,6],[3,7]
-        ]
-        for i,j in box_lines:
-            ax.plot(*zip(corners_world[i], corners_world[j]), color='b')
-        ax.scatter(*pos, color='r', s=40, label='CoG')
-        axis_len = 0.3
-        origin = pos
-        x_axis = origin + rot @ np.array([axis_len, 0, 0])
-        y_axis = origin + rot @ np.array([0, axis_len, 0])
-        z_axis = origin + rot @ np.array([0, 0, axis_len])
-        ax.plot(*zip(origin, x_axis), color='r')
-        ax.plot(*zip(origin, y_axis), color='g')
-        ax.plot(*zip(origin, z_axis), color='b')
-
-    timesteps = all_links.shape[0]
-    x_min = np.min(np.concatenate([all_links[:, :, 0], eta_all[:, 0, None]], axis=1))
-    x_max = np.max(np.concatenate([all_links[:, :, 0], eta_all[:, 0, None]], axis=1))
-    y_min = np.min(np.concatenate([all_links[:, :, 1], eta_all[:, 1, None]], axis=1))
-    y_max = np.max(np.concatenate([all_links[:, :, 1], eta_all[:, 1, None]], axis=1))
-    z_min = np.min(np.concatenate([all_links[:, :, 2], eta_all[:, 2, None]], axis=1))
-    z_max = np.max(np.concatenate([all_links[:, :, 2], eta_all[:, 2, None]], axis=1))
-    margin = 0.05
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-    z_range = z_max - z_min
+    obj1_data = np.array(obj1_data)
+    obj2_data = np.array(obj2_data)
+    eef_att_all = np.array(eef_att_all)
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
@@ -276,6 +246,86 @@ def animate_uvms(eta_all, all_links, dt, box_size=(0.4571, 0.575, 0.2539)):
     ax.set_ylabel('Y [m]')
     ax.set_zlabel('Z [m]')
 
+    def update(frame):
+        ax.cla()
+        ax.set_xlim([-1, 1])
+        ax.set_ylim([-1, 1])
+        ax.set_zlim([-2, 1])
+        ax.set_xlabel('X [m]')
+        ax.set_ylabel('Y [m]')
+        ax.set_zlabel('Z [m]')
+        plot_vehicle(ax, eta_all[frame], box_size=box_size)
+        links = all_links[frame]
+        ax.plot(links[:, 0], links[:, 1], links[:, 2], 'o-', lw=2, markersize=4, color='tab:blue', label='Manipulator')
+        ax.plot([links[-1, 0]], [links[-1, 1]], [links[-1, 2]], 'ro', markersize=8, label='End Effector')
+        plot_eef_frame(ax, links[-1], eef_att_all[frame], axis_len=0.1)
+        plot_lss(ax, obj1_data[frame], color='m', alpha=0.3)
+        plot_lss(ax, obj2_data[frame], color='c', alpha=0.3)
+        legend_elements = [
+            Line2D([0], [0], color='r', lw=2, label='X axis'),
+            Line2D([0], [0], color='g', lw=2, label='Y axis'),
+            Line2D([0], [0], color='b', lw=2, label='Z axis'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='r', markersize=8, label='CoG'),
+            Line2D([0], [0], marker='o', color='tab:blue', markersize=6, label='Manipulator'),
+            Line2D([0], [0], marker='o', color='r', markersize=8, label='End Effector'),
+            Line2D([0], [0], color='r', lw=2, label='EEF X axis'),
+            Line2D([0], [0], color='g', lw=2, label='EEF Y axis'),
+            Line2D([0], [0], color='b', lw=2, label='EEF Z axis'),
+            Line2D([0], [0], color='m', lw=2, label='LSS 1'),
+            Line2D([0], [0], color='c', lw=2, label='LSS 2')
+        ]
+        ax.legend(handles=legend_elements, loc='upper left')
+        ax.set_title(f"Step {frame} (t={frame*dt:.2f}s)")
+
+    ani = FuncAnimation(fig, update, frames=n_steps, interval=dt*1000)
+    plt.show()
+
+def animate_uvms_from_state(X_all, manip_params, R_B_0, r_B_0, dt, box_size=(0.4571, 0.575, 0.2539)):
+    """
+    Animate the trajectory of a UVMS (vehicle + manipulator) in 3D space from state trajectory X_all.
+    """
+    n_steps = X_all.shape[1]
+    eta_all, all_links, eef_att_all = [], [], []
+    kin = manip_kin.Kinematics(manip_params)
+    n_joints = kin.n_joints
+    for i in range(n_steps):
+        q = X_all[:n_joints, i]
+        eta = X_all[-7:, i]
+        pos_veh = eta[:3]
+        quat_veh = eta[3:]
+        euler = utils_math.quat_to_euler(quat_veh)
+        kin.update(q)
+        R_I_B = utils_math.rotation_matrix_from_quat(quat_veh)
+        joint_positions = [pos_veh + R_I_B @ r_B_0]
+        for idx in range(n_joints + 1):
+            link_pos = kin.get_link_position(idx)
+            link_pos = np.squeeze(link_pos)
+            joint_positions.append(joint_positions[0] + R_I_B @ R_B_0 @ link_pos)
+        joint_positions = np.array(joint_positions)
+        joint_positions = np.squeeze(joint_positions)
+        all_links.append(joint_positions)
+        eta_euler = np.concatenate((pos_veh, euler))
+        eta_all.append(eta_euler)
+        eef_att = R_I_B @ R_B_0 @ utils_math.rotation_matrix_from_quat(kin.get_eef_attitude())
+        eef_att_all.append(np.squeeze(utils_math.rotation_matrix_to_quaternion(eef_att)))
+    eta_all = np.array(eta_all)
+    all_links = np.array(all_links)
+    eef_att_all = np.array(eef_att_all)
+    animate_uvms(eta_all, all_links, dt, eef_att_all, box_size=box_size)
+
+def animate_uvms(eta_all, all_links, dt, eef_att_all, box_size=(0.4571, 0.575, 0.2539)):
+    """
+    Animate the trajectory of a UVMS (vehicle + manipulator) in 3D space.
+    """
+    timesteps = all_links.shape[0]
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_xlim([-1, 1])
+    ax.set_ylim([-1, 1])
+    ax.set_zlim([-2, 1])
+    ax.set_xlabel('X [m]')
+    ax.set_ylabel('Y [m]')
+    ax.set_zlabel('Z [m]')
     arm_line, = ax.plot([], [], [], 'o-', lw=2, markersize=4, color='tab:blue')
     eef_point, = ax.plot([], [], [], 'ro', markersize=6, label='End Effector')
 
@@ -291,6 +341,7 @@ def animate_uvms(eta_all, all_links, dt, box_size=(0.4571, 0.575, 0.2539)):
         links = all_links[frame]
         ax.plot(links[:, 0], links[:, 1], links[:, 2], 'o-', lw=2, markersize=4, color='tab:blue', label='Manipulator')
         ax.plot([links[-1, 0]], [links[-1, 1]], [links[-1, 2]], 'ro', markersize=8, label='End Effector')
+        plot_eef_frame(ax, links[-1], eef_att_all[frame], axis_len=0.1)
         legend_elements = [
             Line2D([0], [0], color='r', lw=2, label='X axis'),
             Line2D([0], [0], color='g', lw=2, label='Y axis'),
