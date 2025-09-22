@@ -227,7 +227,7 @@ def _Lumelsky() -> ca.Function:
     return ca.Function('lumelsky', [p11, p12, p21, p22, beta, reg_eps, k_par, tau], [MinD_squared, t, u]).expand()
 
 
-def _Lumeslky_cases() -> ca.Function:
+def _Lumelsky_cases() -> ca.Function:
     p11 = ca.MX.sym('p11', 3)
     p12 = ca.MX.sym('p12', 3)
     p21 = ca.MX.sym('p21', 3)
@@ -300,16 +300,6 @@ def _Lumeslky_cases() -> ca.Function:
 
 
 def main():
-
-
-
-    return ca.Function('lumelsky_cases', [p11, p12, p21, p22], [D1, D2, R, S1, S2]).expand()
-
-
-
-
-
-def main():
     use_sym_if_else = False
     np.random.seed(42)
     errors = []
@@ -317,7 +307,7 @@ def main():
 
     lumelsky_sym = _Lumelsky()
 
-    lumelsky_cases = _Lumeslky_cases()
+    lumelsky_cases = _Lumelsky_cases()
 
     for i in range(50):
         # Random segments in 3D
