@@ -71,8 +71,8 @@ D_FUN = None
 G_FUN = None
 J_FUN = None
 
-# Q0 = np.array([0.1, np.pi/2, np.pi/2, 0.0])  # Initial joint angles
-Q0 = np.array([np.pi, np.pi/2, 3*np.pi/4, np.pi/5])  # Initial joint angles
+# Q0 = np.array([0.1, 3*np.pi/4, np.pi/2, 0.0])  # Initial joint angles # arm down
+Q0 = np.array([np.pi, np.pi/2, 3*np.pi/4, np.pi/5])  # Initial joint angles # arm foward
 POS0 = np.array([0.0, 0.0, 0.0])
 ATT0_EULER = np.array([0.0, 0.0, 0.0])
 ATT0_QUAT = utils_math.euler_to_quat(ATT0_EULER[0], ATT0_EULER[1], ATT0_EULER[2])
@@ -98,7 +98,7 @@ def _constraint_collision(collision_test: ca.Function) -> ca.Function:
     # p_elbow_offset = ca.DM([-0.18, 0.0, 0.0])
     p_vehicle_offset = ca.DM([-0.003, 0.0, 0.022])
     p_vehicle_pill_offset = ca.DM([0.0, 0.1375, 0.0]) # offset to pill end points left and right (L=0.275m/2)
-    safety_margin = ca.DM(0.05) # meters
+    safety_margin = ca.DM(0.02) # meters # alpha_L
     p_unit = ca.DM([1.0, 0.0, 0.0])
 
     # p_underarm1 = p_eef + utils_sym.quaternion_rotation(att_eef, p_eef_offset)
@@ -116,11 +116,13 @@ def _constraint_collision(collision_test: ca.Function) -> ca.Function:
     obj1 = ca.vertcat(p_vehicle1, p_vehicle2, radius_vehicle)
     obj2 = ca.vertcat(p_underarm1, p_underarm2, radius_underarm)
 
-    g_no_collision = collision_test(obj1, obj2, safety_margin) # >= 0 means no collision
+    g_no_collision, d = collision_test(obj1, obj2, safety_margin) # >= 0 means no collision
+
+    rho = Lumelsky.seperation_cost_symbolic(eta=10.0, beta=0.05, d=d) # beta [m] must be greater than safety margin to be effective
 
     # g_no_collision = ca.dot(p_vehicle - p_eef, p_vehicle - p_eef)
 
-    return ca.Function('constraint_collision', [p_vehicle, att_vehicle, p_eef, att_eef], [g_no_collision, obj1, obj2]).expand()
+    return ca.Function('constraint_collision', [p_vehicle, att_vehicle, p_eef, att_eef], [g_no_collision, obj1, obj2, rho]).expand()
     
 def _check_collision(lumelsky_fun: ca.Function) -> ca.Function:
     # obj1 = [p1, p2, radius1] # swept-sphere
@@ -151,7 +153,10 @@ def _check_collision(lumelsky_fun: ca.Function) -> ca.Function:
 
     g_no_collision = d2 - (safety_margin + r_sum)**2 # >= 0 means no collision
 
-    return ca.Function('collision_check', [obj1, obj2, safety_margin], [g_no_collision]).expand()
+    #TODO: find computational cheaper version to sqrt
+    d = ca.sqrt(d2) - r_sum
+
+    return ca.Function('collision_check', [obj1, obj2, safety_margin], [g_no_collision, d]).expand()
 
 def _build_tau_coupling_func() -> ca.Function:
     q = ca.MX.sym('q', N_JOINTS)
@@ -414,9 +419,13 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         att_vehicle = xk[N_JOINTS+N_DOF+3 : N_JOINTS+N_DOF+7]
 
         # print(CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef))
-        g_collision, _, _ = CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef)
+        g_collision, _, _, rho_collision = CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef)
+
+        cost += rho_collision
 
         opti.subject_to(g_collision >= 0)
+
+        #TODO: manipulability cost that drives arm away from singularities
 
         u_prev = uk
         dnu_g  = dnu_k
@@ -750,7 +759,7 @@ def main():
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
     # veh_pos_ref_val = np.array([0.8, 0.0, -0.1])  # desired vehicle position for station-keeping
-    veh_pos_ref_val = np.array([0.0, 0.0, -0.1])  # desired vehicle position for station-keeping
+    veh_pos_ref_val = np.array([0.1, 0.0, 0.2])  # desired vehicle position for station-keeping
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}

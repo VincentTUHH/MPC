@@ -227,7 +227,7 @@ def animate_uvms_with_bounding_spheres(X_all, manip_params, R_B_0, r_B_0, dt, co
         eef_quat = np.squeeze(utils_math.rotation_matrix_to_quaternion(R_I_B @ R_B_0 @ utils_math.rotation_matrix_from_quat(kin.get_eef_attitude())))
         eef_pos = pos_veh + R_I_B @ r_B_0 + R_I_B @ R_B_0 @ kin.get_eef_position()
         eef_att_all.append(eef_quat)
-        lumelsky_result, obj1, obj2 = collision_func(pos_veh, quat_veh, eef_pos, eef_quat)
+        lumelsky_result, obj1, obj2, _ = collision_func(pos_veh, quat_veh, eef_pos, eef_quat)
         lumelsky_data.append(np.squeeze(np.array(lumelsky_result)))
         obj1_data.append(np.squeeze(np.array(obj1)))
         obj2_data.append(np.squeeze(np.array(obj2)))
