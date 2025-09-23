@@ -298,12 +298,32 @@ def _Lumelsky_cases() -> ca.Function:
 
     return ca.Function('lumelsky_cases', [p11, p12, p21, p22], [MinD_squared, t_sw, u_sw]).expand()
 
+def seperation_cost(eta, beta, d):
+    if d < beta:
+        rho = eta * (1.0-d/beta)**3
+    else:
+        rho = 0.0
+    return rho
+
+def seperation_cost_symbolic(eta, beta, d):
+    rho = ca.if_else(d < beta, eta * (1.0 - d/beta)**3, 0.0)
+    return rho
+
+def seperation_cost_squared(eta, beta, d_squared):
+    t = (d_squared)/(beta**2)
+    if d_squared < beta**2:
+        rho = eta * (1.0 - d_squared/beta**2)**2 * (1-10*t**3 + 15*t**4 - 6*t**5)
+    else:
+        rho = 0.0
+    return rho, np.sqrt(d_squared)
+
 
 def main():
     use_sym_if_else = False
     np.random.seed(42)
     errors = []
     segments = []
+    MinD_squared_list = []
 
     lumelsky_sym = _Lumelsky()
 
@@ -350,6 +370,8 @@ def main():
             tau = 0.005
             MinD_sym, t_sym, u_sym = lumelsky_sym(p11, p12, p21, p22, beta, reg_eps, k_par, tau)
             MinD_sym = float(MinD_sym)
+
+        MinD_squared_list.append((MinD_num, MinD_sym))
 
         # print(f"Case {i+1}: Min Distance (numeric) = {np.sqrt(MinD_num):.6f}, Min Distance (symbolic) = {np.sqrt(MinD_sym):.6f}")
         print(f"Case {i+1}: Min Distance (non-squared, numeric) = {MinD_num:.6f}, Min Distance (non-squared, symbolic) = {MinD_sym:.6f}")
@@ -410,7 +432,24 @@ def main():
         plt.tight_layout()
         plt.show()
 
-    
+    span = np.linspace(-1.0, 10, num=600)
+    cost_list = []
+    sqrt_span = []
+    for i in range(len(span)):
+        cost = seperation_cost(eta=0.3, beta=2.0, d=span[i])
+        cost_list.append(cost)
+        sqrt_span.append(span[i])
+
+    plt.figure(figsize=(7, 4))
+    plt.plot(sqrt_span, cost_list, label='Separation Cost')
+    plt.xlabel('Squared Distance')
+    plt.ylabel('Cost')
+    plt.title('Separation Cost vs Squared Distance')
+    plt.legend()
+    plt.grid(True)
+    plt.axvline(x=2.0, color='orange', linestyle='--', label='beta')
+    plt.tight_layout()
+    plt.show()
 
     return
 
