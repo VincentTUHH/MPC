@@ -166,6 +166,34 @@ def plot_lss(ax, obj, color='m', alpha=0.3):
         Z = p1[2] + v_dir[2]*t + r*np.cos(theta)*n1[2] + r*np.sin(theta)*n2[2]
         ax.plot_surface(X, Y, Z, color=color, alpha=alpha, linewidth=0)
 
+def plot_tank_box(ax, xlim=(0, 2), ylim=(0, 4), zlim=(-1.5, 0)):
+        """Draws the edges of the water tank as a transparent box."""
+        tank_x = [xlim[0], xlim[1]]
+        tank_y = [ylim[0], ylim[1]]
+        tank_z = [zlim[0], zlim[1]]
+        tank_vertices = np.array([
+            [tank_x[0], tank_y[0], tank_z[0]],
+            [tank_x[1], tank_y[0], tank_z[0]],
+            [tank_x[1], tank_y[1], tank_z[0]],
+            [tank_x[0], tank_y[1], tank_z[0]],
+            [tank_x[0], tank_y[0], tank_z[1]],
+            [tank_x[1], tank_y[0], tank_z[1]],
+            [tank_x[1], tank_y[1], tank_z[1]],
+            [tank_x[0], tank_y[1], tank_z[1]],
+        ])
+        tank_edges = [
+            (0,1), (1,2), (2,3), (3,0),  # bottom
+            (4,5), (5,6), (6,7), (7,4),  # top
+            (0,4), (1,5), (2,6), (3,7)   # sides
+        ]
+        for i, j in tank_edges:
+            ax.plot(
+                [tank_vertices[i,0], tank_vertices[j,0]],
+                [tank_vertices[i,1], tank_vertices[j,1]],
+                [tank_vertices[i,2], tank_vertices[j,2]],
+                color='b', linestyle='--', linewidth=1, alpha=0.7, label='_nolegend_'
+            )
+
 def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
     '''Animate the trajectory of a BlueROV vehicle in 3D space.'''
     fig = plt.figure()
@@ -261,6 +289,7 @@ def animate_uvms_with_bounding_spheres(X_all, manip_params, R_B_0, r_B_0, dt, co
         plot_eef_frame(ax, links[-1], eef_att_all[frame], axis_len=0.1)
         plot_lss(ax, obj1_data[frame], color='m', alpha=0.3)
         plot_lss(ax, obj2_data[frame], color='c', alpha=0.3)
+        plot_tank_box(ax)
         legend_elements = [
             Line2D([0], [0], color='r', lw=2, label='X axis'),
             Line2D([0], [0], color='g', lw=2, label='Y axis'),

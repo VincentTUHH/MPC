@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 from scipy.differentiate import derivative
 from scipy.interpolate import UnivariateSpline
 from common.utils_math import softclip
+from common import utils_sym
 # from scipy.misc import derivative
 
 def softplus(x):
@@ -28,7 +29,41 @@ def softclip_local(x, a=None, b=None, beta=None):
         v = v - softplus(beta*(x - b)) / beta
     return v
 
+def smoothmin(a, b, beta):
+    """Smooth minimum between a and b, with parameterized sharpness."""
+    return -1/beta * np.log(np.exp(-beta*a) + np.exp(-beta*b))
+
 def main():
+    x_vals = np.linspace(0, 10, 100)
+    a_vals = np.sin(x_vals)
+    b_vals = np.exp(-x_vals)
+    smoothmin_vals_5 = smoothmin(a_vals, b_vals, beta=5.0)
+    smoothmin_vals_10 = smoothmin(a_vals, b_vals, beta=10.0)
+    smoothmin_vals_20 = smoothmin(a_vals, b_vals, beta=20.0)
+    true_min_vals = np.minimum(a_vals, b_vals)
+
+    func = utils_sym.smoothmin
+    results = []
+    for a,b in zip(a_vals,b_vals):
+        results.append(func(a,b,10.0))
+
+
+    plt.figure()
+    plt.plot(x_vals, a_vals, label='sin(x)')
+    plt.plot(x_vals, b_vals, label='exp(-x)')
+    plt.plot(x_vals, smoothmin_vals_5, label='smoothmin(sin(x), exp(-x), beta=5)')
+    plt.plot(x_vals, smoothmin_vals_10, label='smoothmin(sin(x), exp(-x), beta=10)')
+    plt.plot(x_vals, smoothmin_vals_20, label='smoothmin(sin(x), exp(-x), beta=20)')
+    plt.plot(x_vals, true_min_vals, label='true min(sin(x), exp(-x))', linestyle='--')
+    plt.plot(x_vals, results, 'k.', label='CasADi smoothmin (beta=10)')
+    plt.legend()
+    plt.grid()
+    plt.title('sin(x), exp(-x), and smoothmin')
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.show()
+
+
     x = np.linspace(-2, 2, 1000)
 
     beta1 = 10.0

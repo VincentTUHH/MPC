@@ -45,6 +45,7 @@ LUMELSKY: Optional[ca.Function] = None
 LUMELSKY_CASES: Optional[ca.Function] = None
 COLLISION: Optional[ca.Function] = None
 CONSTRAINT_COLLISION: Optional[ca.Function] = None
+CONSTRAINT_TANK: Optional[ca.Function] = None
 
 # Constants/config for fast access
 USE_QUATERNION: bool = False
@@ -73,7 +74,7 @@ J_FUN = None
 
 # Q0 = np.array([0.1, 3*np.pi/4, np.pi/2, 0.0])  # Initial joint angles # arm down
 Q0 = np.array([np.pi, np.pi/2, 3*np.pi/4, np.pi/5])  # Initial joint angles # arm foward
-POS0 = np.array([0.0, 0.0, 0.0])
+POS0 = np.array([1.0, 2.0, -0.7])
 ATT0_EULER = np.array([0.0, 0.0, 0.0])
 ATT0_QUAT = utils_math.euler_to_quat(ATT0_EULER[0], ATT0_EULER[1], ATT0_EULER[2])
 VEL0 = np.array([0.0, 0.0, 0.0])
@@ -83,6 +84,71 @@ UVMS_MODEL_INSTANCE: Optional[uvms_model.UVMSModel] = None
 MANIP_PARAMS: Optional[dict] = None
 ALPHA_PARAMS: Optional[dict] = None
 BRV_PARAMS: Optional[dict] = None
+
+def _constraint_tank() -> ca.Function:
+    vehicle_bound = ca.MX.sym('vehicle_bound', 7)
+    underarm_bound = ca.MX.sym('underarm_bound', 7) # swept-sphere
+
+    beta_smoothmin = ca.DM(10.0)
+    safety_margin = ca.DM(0.05)
+    beta_margin = ca.DM(0.2) # must be greater than safety_margin
+    eta_weight = ca.DM(4.0)
+
+    p1_vehicle = vehicle_bound[0:3]
+    p2_vehicle = vehicle_bound[3:6]
+    radius_vehicle = vehicle_bound[6]
+
+    p1_underarm = underarm_bound[0:3]
+    p2_underarm = underarm_bound[3:6]
+    radius_underarm = underarm_bound[6]
+
+    # Define the points and normals for 6 planes as CasADi DM arrays
+    plane_points = [
+        ca.DM([0.0, 0.5, -1.3]),  # Plane 1
+        ca.DM([0.0, 0.5, -1.3]),  # Plane 2
+        ca.DM([0.0, 0.5, -1.3]),  # Plane 3
+        ca.DM([2.0, 3.5, 0.0]),   # Plane 4
+        ca.DM([2.0, 3.5, 0.0]),   # Plane 5
+        ca.DM([2.0, 3.5, 0.0]),   # Plane 6
+    ]
+
+    plane_normals = [
+        ca.DM([ 1.0,  0.0,  0.0]),  # Plane 1
+        ca.DM([ 0.0,  1.0,  0.0]),  # Plane 2
+        ca.DM([ 0.0,  0.0,  1.0]),  # Plane 3
+        ca.DM([-1.0,  0.0,  0.0]),  # Plane 4
+        ca.DM([ 0.0, -1.0,  0.0]),  # Plane 5
+        ca.DM([ 0.0,  0.0, -1.0]),  # Plane 6
+    ]
+
+    # Compute signed distances from each plane for vehicle and underarm
+    g_vehicle = []
+    g_underarm = []
+    rho_vehicle = []
+    rho_underarm = []
+    for i in range(len(plane_points)):
+        point = plane_points[i]
+        normal = plane_normals[i]
+        # Signed distance: dot(normal, (x - point))
+        d1_vehicle = ca.dot(normal, p1_vehicle - point)
+        d2_vehicle = ca.dot(normal, p2_vehicle - point)
+        d1_underarm = ca.dot(normal, p1_underarm - point)
+        d2_underarm = ca.dot(normal, p2_underarm - point)
+        dmin_vehicle = utils_sym.smoothmin(d1_vehicle, d2_vehicle, beta_smoothmin) - radius_vehicle
+        dmin_underarm = utils_sym.smoothmin(d1_underarm, d2_underarm, beta_smoothmin) - radius_underarm
+        g_vehicle.append(dmin_vehicle - safety_margin)
+        g_underarm.append(dmin_underarm - safety_margin)
+        rho_vehicle.append(Lumelsky.seperation_cost_symbolic(eta=eta_weight, beta=beta_margin, d=dmin_vehicle))
+        rho_underarm.append(Lumelsky.seperation_cost_symbolic(eta=eta_weight, beta=beta_margin, d=dmin_underarm))
+
+
+    g_vehicle = ca.vertcat(*g_vehicle)
+    g_underarm = ca.vertcat(*g_underarm)
+
+    cost_vehicle = ca.sum(ca.vertcat(*rho_vehicle))
+    cost_underarm = ca.sum(ca.vertcat(*rho_underarm))
+
+    return ca.Function('constraint_tank', [vehicle_bound, underarm_bound], [g_vehicle, g_underarm, cost_vehicle, cost_underarm]).expand()
 
 def _constraint_collision(collision_test: ca.Function) -> ca.Function:
     p_vehicle = ca.MX.sym('p_vehicle', 3)
@@ -417,13 +483,15 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         # Collision avoidance
         p_vehicle = xk[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3]
         att_vehicle = xk[N_JOINTS+N_DOF+3 : N_JOINTS+N_DOF+7]
-
-        # print(CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef))
-        g_collision, _, _, rho_collision = CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef)
-
-        cost += rho_collision
-
+        # self-collision
+        g_collision, vehicle_bound, underarm_bound, rho_collision = CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef)
         opti.subject_to(g_collision >= 0)
+        cost += rho_collision
+        # collision with tank
+        g_vehicle, g_underarm, cost_vehicle, cost_underarm = CONSTRAINT_TANK(vehicle_bound, underarm_bound)
+        opti.subject_to(g_vehicle >= 0)
+        opti.subject_to(g_underarm >= 0)
+        cost += cost_vehicle + cost_underarm
 
         #TODO: manipulability cost that drives arm away from singularities
 
@@ -651,7 +719,7 @@ def init_uvms_model(
     fixed_point_iter: int = 2,
     n_horizon: int = 10
 ) -> None:
-    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED, LUMELSKY, LUMELSKY_CASES, COLLISION, CONSTRAINT_COLLISION
+    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED, LUMELSKY, LUMELSKY_CASES, COLLISION, CONSTRAINT_COLLISION, CONSTRAINT_TANK
     global USE_QUATERNION, USE_PWM, USE_FIXED_POINT, FIXED_POINT_ITER, N_HORIZON, V_BAT, L, MIXER, M_INV, JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, INTEGRATOR, N_DOF, N_JOINTS, STATE_DIM, CTRL_DIM, C_FUN, D_FUN, G_FUN, J_FUN
     global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, MANIP_KIN_REAL
     global MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS
@@ -706,6 +774,7 @@ def init_uvms_model(
         LUMELSKY_CASES = Lumelsky._Lumelsky_cases()
         COLLISION = _check_collision(LUMELSKY_CASES)
         CONSTRAINT_COLLISION = _constraint_collision(COLLISION)
+        CONSTRAINT_TANK = _constraint_tank()
 
         INITIALIZED = True
 
@@ -759,7 +828,7 @@ def main():
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
     # veh_pos_ref_val = np.array([0.8, 0.0, -0.1])  # desired vehicle position for station-keeping
-    veh_pos_ref_val = np.array([0.1, 0.0, 0.2])  # desired vehicle position for station-keeping
+    veh_pos_ref_val = np.array([3.0, 2.0, -0.7])  # desired vehicle position for station-keeping
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}

@@ -26,6 +26,10 @@ def softclip(x, a=None, b=None, beta=None):
     v = v - softplus(beta * (x - b)) / beta
     return v
 
+def smoothmin(a, b, beta):
+    """Smooth minimum between a and b, with parameterized sharpness, CasADi symbolic version."""
+    return -1/beta * ca.log(ca.exp(-beta*a) + ca.exp(-beta*b))
+
 def quaternion_rotation(q, v):
     """
     Rotate vector v by unit quaternion q using CasADi.
