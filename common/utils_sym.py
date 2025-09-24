@@ -66,7 +66,7 @@ def rotation_matrix_from_quat(quat):
 def rotation_matrix_from_euler(phi, theta, psi):
     """
     Create a rotation matrix from Euler angles (phi, theta, psi) = (roll, pitch, yaw).
-    ZYX convention is used
+    ZYX intrinsicconvention is used
     """
     cphi = ca.cos(phi)
     sphi = ca.sin(phi)
@@ -74,6 +74,8 @@ def rotation_matrix_from_euler(phi, theta, psi):
     stheta = ca.sin(theta)
     cpsi = ca.cos(psi)
     spsi = ca.sin(psi)
+    # R = Rz(psi) @ Ry(theta) @ Rx(phi)
+    # R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
     R = ca.vertcat(
         ca.horzcat(cpsi * ctheta, cpsi * stheta * sphi - spsi * cphi, cpsi * stheta * cphi + spsi * sphi),
         ca.horzcat(spsi * ctheta, spsi * stheta * sphi + cpsi * cphi, spsi * stheta * cphi - cpsi * sphi),

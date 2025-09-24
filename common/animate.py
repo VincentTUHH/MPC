@@ -98,7 +98,7 @@ def plot_vehicle(ax, eta, box_size):
     """Draws a vehicle box and axes at pose eta."""
     pos = eta[:3]
     phi, theta, psi = eta[3:6]
-    rot = R.from_euler('zyx', [psi, theta, phi]).as_matrix()
+    rot = R.from_euler('ZYX', [psi, theta, phi]).as_matrix()
     l, w, h = box_size
     corners = np.array([
         [ l/2,  w/2, -h/2],
@@ -467,8 +467,8 @@ def plot_pose_error_boxplots(reference_eta, real_eta):
     # Attitude error norm (Euler angles, in radians)
     att_error = np.linalg.norm(reference_eta[:, 3:] - real_eta[:, 3:], axis=1)
     # Convert Euler angles to quaternions for all timesteps
-    reference_quat = R.from_euler('zyx', reference_eta[:, 5::-1][:, :3]).as_quat()  # [x, y, z, w]
-    real_quat = R.from_euler('zyx', real_eta[:, 5::-1][:, :3]).as_quat()
+    reference_quat = R.from_euler('ZYX', reference_eta[:, 5::-1][:, :3]).as_quat()  # [x, y, z, w]
+    real_quat = R.from_euler('ZYX', real_eta[:, 5::-1][:, :3]).as_quat()
 
     # Reorder to [w, x, y, z] for consistency with your functions
     reference_quat = np.concatenate([reference_quat[:, 3:4], reference_quat[:, :3]], axis=1)

@@ -73,7 +73,7 @@ def rotation_matrix_from_quat(q):
 def rotation_matrix_from_euler(phi, theta, psi):
     """
     Create a rotation matrix from Euler angles (phi, theta, psi) = (roll, pitch, yaw).
-    ZYX extrinsic convention is used
+    ZYX intrinsic convention is used
     """
     # cphi = np.cos(phi)
     # sphi = np.sin(phi)
@@ -86,6 +86,24 @@ def rotation_matrix_from_euler(phi, theta, psi):
     #     [spsi * ctheta, spsi * stheta * sphi + cpsi * cphi, spsi * stheta * cphi - cpsi * sphi],
     #     [-stheta,        ctheta * sphi,                     ctheta * cphi]
     # ])
+    # Rx = np.array([
+    #     [1, 0, 0],
+    #     [0, np.cos(phi), -np.sin(phi)],
+    #     [0, np.sin(phi), np.cos(phi)]
+    # ])
+    # Ry = np.array([
+    #     [np.cos(theta), 0, np.sin(theta)],
+    #     [0, 1, 0],
+    #     [-np.sin(theta), 0, np.cos(theta)]
+    # ])
+    # Rz = np.array([
+    #     [np.cos(psi), -np.sin(psi), 0],
+    #     [np.sin(psi), np.cos(psi), 0],
+    #     [0, 0, 1]
+    # ])
+
+    # R1 = Rz @ Ry @ Rx
+
     R = Rot.from_euler('ZYX', [psi, theta, phi]).as_matrix() # case sensitive: upper case is extrinsic -> rotating in world frame
     return R
 
