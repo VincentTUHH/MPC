@@ -198,18 +198,18 @@ def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
     '''Animate the trajectory of a BlueROV vehicle in 3D space.'''
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    ax.set_xlim([-1, 1])
-    ax.set_ylim([-1, 1])
-    ax.set_zlim([-2, 1])
+    ax.set_xlim([0, 2])
+    ax.set_ylim([0, 4])
+    ax.set_zlim([-1.5, 0])
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
 
     def update(frame):
         ax.cla()
-        ax.set_xlim([-2, 2])
-        ax.set_ylim([-2, 2])
-        ax.set_zlim([-2, 1])
+        ax.set_xlim([0, 2])
+        ax.set_ylim([0, 4])
+        ax.set_zlim([-1.5, 0])
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
         ax.set_zlabel('Z')
@@ -225,6 +225,34 @@ def animate_bluerov(eta_all, dt, box_size=(0.4571, 0.575, 0.2539)):
 
     ani = FuncAnimation(fig, update, frames=eta_all.shape[0], interval=dt*1000)
     plt.show()
+
+def set_axes_equal(ax):
+    """
+    Make axes of 3D plot have equal scale so that spheres appear as spheres,
+    cubes as cubes, etc.
+
+    Input
+      ax: a matplotlib axis, e.g., as output from plt.gca().
+    """
+
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+
+    x_range = abs(x_limits[1] - x_limits[0])
+    x_middle = np.mean(x_limits)
+    y_range = abs(y_limits[1] - y_limits[0])
+    y_middle = np.mean(y_limits)
+    z_range = abs(z_limits[1] - z_limits[0])
+    z_middle = np.mean(z_limits)
+
+    # The plot bounding box is a sphere in the sense of the infinity
+    # norm, hence I call half the max range the plot radius.
+    plot_radius = 0.5*max([x_range, y_range, z_range])
+
+    ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
+    ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
+    ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
 
 def animate_uvms_with_bounding_spheres(X_all, manip_params, R_B_0, r_B_0, dt, collision_func, box_size=(0.4571, 0.575, 0.2539)):
     """
@@ -267,18 +295,18 @@ def animate_uvms_with_bounding_spheres(X_all, manip_params, R_B_0, r_B_0, dt, co
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    ax.set_xlim([-1, 1])
-    ax.set_ylim([-1, 1])
-    ax.set_zlim([-2, 1])
+    ax.set_xlim([0, 2])
+    ax.set_ylim([0, 4])
+    ax.set_zlim([-1.5, 0])
     ax.set_xlabel('X [m]')
     ax.set_ylabel('Y [m]')
     ax.set_zlabel('Z [m]')
 
     def update(frame):
         ax.cla()
-        ax.set_xlim([-1, 1])
-        ax.set_ylim([-1, 1])
-        ax.set_zlim([-2, 1])
+        ax.set_xlim([0, 2])
+        ax.set_ylim([0, 4])
+        ax.set_zlim([-1.5, 0])
         ax.set_xlabel('X [m]')
         ax.set_ylabel('Y [m]')
         ax.set_zlabel('Z [m]')
@@ -305,6 +333,7 @@ def animate_uvms_with_bounding_spheres(X_all, manip_params, R_B_0, r_B_0, dt, co
         ]
         ax.legend(handles=legend_elements, loc='upper left')
         ax.set_title(f"Step {frame} (t={frame*dt:.2f}s)")
+        set_axes_equal(ax)
 
     ani = FuncAnimation(fig, update, frames=n_steps, interval=dt*1000)
     plt.show()
@@ -349,9 +378,9 @@ def animate_uvms(eta_all, all_links, dt, eef_att_all, box_size=(0.4571, 0.575, 0
     timesteps = all_links.shape[0]
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    ax.set_xlim([-1, 1])
-    ax.set_ylim([-1, 1])
-    ax.set_zlim([-2, 1])
+    ax.set_xlim([0, 2])
+    ax.set_ylim([0, 4])
+    ax.set_zlim([-1.5, 0])
     ax.set_xlabel('X [m]')
     ax.set_ylabel('Y [m]')
     ax.set_zlabel('Z [m]')
@@ -360,9 +389,9 @@ def animate_uvms(eta_all, all_links, dt, eef_att_all, box_size=(0.4571, 0.575, 0
 
     def update(frame):
         ax.cla()
-        ax.set_xlim([-1, 1])
-        ax.set_ylim([-1, 1])
-        ax.set_zlim([-1, 0])
+        ax.set_xlim([0, 2])
+        ax.set_ylim([0, 4])
+        ax.set_zlim([-1.5, 0])
         ax.set_xlabel('X [m]')
         ax.set_ylabel('Y [m]')
         ax.set_zlabel('Z [m]')
