@@ -165,6 +165,8 @@ def _constraint_collision(collision_test: ca.Function) -> ca.Function:
     p_vehicle_offset = ca.DM([-0.003, 0.0, 0.022])
     p_vehicle_pill_offset = ca.DM([0.0, 0.1375, 0.0]) # offset to pill end points left and right (L=0.275m/2)
     safety_margin = ca.DM(0.02) # meters # alpha_L
+    beta_margin = ca.DM(0.05) # must be greater than safety_margin
+    eta_weight = ca.DM(10.0)
     p_unit = ca.DM([1.0, 0.0, 0.0])
 
     # p_underarm1 = p_eef + utils_sym.quaternion_rotation(att_eef, p_eef_offset)
@@ -184,7 +186,7 @@ def _constraint_collision(collision_test: ca.Function) -> ca.Function:
 
     g_no_collision, d = collision_test(obj1, obj2, safety_margin) # >= 0 means no collision
 
-    rho = Lumelsky.seperation_cost_symbolic(eta=10.0, beta=0.05, d=d) # beta [m] must be greater than safety margin to be effective
+    rho = Lumelsky.seperation_cost_symbolic(eta=eta_weight, beta=beta_margin, d=d) # beta [m] must be greater than safety margin to be effective
 
     # g_no_collision = ca.dot(p_vehicle - p_eef, p_vehicle - p_eef)
 
@@ -220,7 +222,9 @@ def _check_collision(lumelsky_fun: ca.Function) -> ca.Function:
     g_no_collision = d2 - (safety_margin + r_sum)**2 # >= 0 means no collision
 
     #TODO: find computational cheaper version to sqrt
-    d = ca.sqrt(d2) - r_sum
+    # Numerically safe sqrt for differentiation
+    eps = 1e-8
+    d = ca.sqrt(d2 + eps) - r_sum
 
     return ca.Function('collision_check', [obj1, obj2, safety_margin], [g_no_collision, d]).expand()
 
@@ -451,19 +455,24 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         opti.subject_to(X[:, k+1] == xkp1)
 
         # costs: hold position, damp velocities, modest effort & smoothness
-        # veh_pos_k = X[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3, k]
+        veh_pos_k = X[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3, k]
         nu_k      = X[N_JOINTS : N_JOINTS+N_DOF, k]
-        # pos_err   = veh_pos_ref - veh_pos_k
+        pos_err_veh   = veh_pos_ref - veh_pos_k
+
+        q_goal = utils_sym.euler_to_quat(ca.DM(0.8), ca.DM(0.0), ca.DM(0.8))
+        att_vehicle = xk[N_JOINTS+N_DOF+3 : N_JOINTS+N_DOF+7]
+        q_error_veh = utils_sym.quaternion_error(q_goal, att_vehicle)
 
         pos_err_eef = veh_pos_ref - p_eef
 
         q_goal = ca.DM([1.0, 0.0, 0.0, 0.0]) # desired quaternion (no rotation)
         q_current = att_eef
-        q_error = utils_sym.quaternion_error(q_goal, q_current)
+        q_error_eef = utils_sym.quaternion_error(q_goal, q_current)
 
-        # cost += pos_err.T @ Qpos @ pos_err
+        # cost += pos_err_veh.T @ Qpos @ pos_err_veh
+        # cost += q_error_veh.T  @ Qpos @ q_error_veh
         cost += pos_err_eef.T @ Qpos @ pos_err_eef
-        # cost += q_error.T  @ Qpos @ q_error
+        # cost += q_error_eef.T @ Qpos @ q_error_eef
         cost += nu_k.T   @ Qvel @ nu_k
         cost += uk.T     @ R    @ uk
         cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
