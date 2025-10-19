@@ -91,6 +91,16 @@ export DYLD_LIBRARY_PATH="/opt/homebrew/Cellar/gcc/15.1.0/lib/gcc/15:$DYLD_LIBRA
 ```
 Make sure the path matches the output from step 2!
 
+And replace the previous last line with
+```bash
+# This should detect bash and zsh, which have a hash command that must
+# be called to get it to forget past commands.  Without forgetting
+# past commands the $PATH changes we made may not be respected
+if [ -n "${BASH:-}" -o -n "${ZSH_VERSION:-}" ] ; then
+    hash -r 2> /dev/null
+fi
+```
+
 ### 4. Activate the venv
 
 Run as before:
