@@ -6,6 +6,7 @@ import numpy as np
 import casadi as ca
 
 from bluerov import dynamics_symbolic as sym_brv
+from bluerov import thruster_model as brv_thruster
 from uvms import model as uvms_model
 from uvms import Lumelsky
 
@@ -253,13 +254,13 @@ def _build_tau_coupling_func() -> ca.Function:
         [tau]
     ).expand()
 
-def _build_dynamics_fossen_func() -> ca.Function:
+def _build_dynamics_fossen_func(thrust_from_pwm_vec: ca.Function) -> ca.Function:
     nu   = ca.MX.sym('nu', N_DOF)
     eta  = ca.MX.sym('eta', 7 if USE_QUATERNION else 6)
     uv   = ca.MX.sym('uv', 8 if USE_PWM else 6)
     tau_c = ca.MX.sym('tau_c', N_DOF)
 
-    tau_v = (L * V_BAT * (MIXER @ uv)) if USE_PWM else uv
+    tau_v = MIXER @ thrust_from_pwm_vec(uv, V_BAT) if USE_PWM else uv
     dnu  = M_INV @ (tau_v + tau_c - C_FUN(nu) @ nu - D_FUN(nu) @ nu - G_FUN(eta))
     return ca.Function('dyn_fossen', [eta,nu,uv,tau_c], [dnu]).expand()
 
@@ -352,7 +353,7 @@ def _build_step_func(f_sys: ca.Function) -> ca.Function:
     def normalize_quat(eta_vec):
         if USE_QUATERNION:
             pos = eta_vec[0:3]; q = eta_vec[3:]
-            return ca.vertcat(pos, q / ca.norm_2(q))
+            return ca.vertcat(pos, q / (ca.sqrt(ca.sumsqr(q)) + 1e-12)) #ca.norm_2(q))
         return eta_vec
 
     if INTEGRATOR == "euler":
@@ -437,7 +438,7 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
     # --- weights (tune as you like) ---
     Qpos = ca.DM.eye(3) * 100.0
     Qvel = ca.DM.eye(N_DOF) * 1.0
-    R    = ca.DM.eye(CTRL_DIM) * 1e-4
+    R    = ca.DM.eye(CTRL_DIM) * 1e-6#* 1e-4
     Rdu  = ca.DM.eye(CTRL_DIM) * 1e-3
 
     # --- rollout over horizon ---
@@ -476,7 +477,7 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         # cost += q_error_eef.T @ Qpos @ q_error_eef
         cost += nu_k.T   @ Qvel @ nu_k
         cost += uk.T     @ R    @ uk
-        cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
+        # cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
 
         if USE_PWM:
             opti.subject_to(U[N_JOINTS:, k] <=  1.0)
@@ -490,18 +491,18 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         opti.subject_to(X[:N_JOINTS, k] <= JOINT_LIMITS[1, :N_JOINTS])
         opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :N_JOINTS])
 
-        # Collision avoidance
-        p_vehicle = xk[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3]
-        att_vehicle = xk[N_JOINTS+N_DOF+3 : N_JOINTS+N_DOF+7]
-        # self-collision
-        g_collision, vehicle_bound, underarm_bound, rho_collision = CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef)
-        opti.subject_to(g_collision >= 0)
-        cost += rho_collision
-        # collision with tank
-        g_vehicle, g_underarm, cost_vehicle, cost_underarm = CONSTRAINT_TANK(vehicle_bound, underarm_bound)
-        opti.subject_to(g_vehicle >= 0)
-        opti.subject_to(g_underarm >= 0)
-        cost += cost_vehicle + cost_underarm
+        # # Collision avoidance
+        # p_vehicle = xk[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3]
+        # att_vehicle = xk[N_JOINTS+N_DOF+3 : N_JOINTS+N_DOF+7]
+        # # self-collision
+        # g_collision, vehicle_bound, underarm_bound, rho_collision = CONSTRAINT_COLLISION(p_vehicle, att_vehicle, p_eef, att_eef)
+        # opti.subject_to(g_collision >= 0)
+        # cost += rho_collision
+        # # collision with tank
+        # g_vehicle, g_underarm, cost_vehicle, cost_underarm = CONSTRAINT_TANK(vehicle_bound, underarm_bound)
+        # opti.subject_to(g_vehicle >= 0)
+        # opti.subject_to(g_underarm >= 0)
+        # cost += cost_vehicle + cost_underarm
 
         #TODO: manipulability cost that drives arm away from singularities
 
@@ -775,8 +776,9 @@ def init_uvms_model(
         STATE_DIM = N_DOF + (7 if USE_QUATERNION else 6) + N_JOINTS
         CTRL_DIM = N_JOINTS + (8 if USE_PWM else 6)
 
+        PWM_2_THRUST = brv_thruster.thrust_from_pwm_vec(n=8) # number of thrusters
         TAU_COUPLING = _build_tau_coupling_func()
-        DYN_FOSSEN = _build_dynamics_fossen_func()
+        DYN_FOSSEN = _build_dynamics_fossen_func(PWM_2_THRUST)
         EEF_POSE, J_EEF = _build_eef_blocks()
         F_SYS = _build_f_sys(TAU_COUPLING, DYN_FOSSEN, EEF_POSE, J_EEF)
         STEP = _build_step_func(F_SYS)
@@ -834,7 +836,7 @@ def main():
         n_horizon=10
     )
 
-    T_duration = 10.0 # [s]
+    T_duration = 10.0 #10.0 # [s]
     dt = 0.05 # sampling [s]
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))

@@ -743,6 +743,190 @@ def compute_rmse(data, poly_coeffs, x_key='pwm', y_key='force'):
         rmse_all += rmse
     print(f"Overall RMSE across all voltages: {rmse_all:.4f} N")
 
+# --- CasADi piecewise thrust model with deadzone ---
+
+def casadi_piecewise_smooth_thrust()->ca.Function:
+    """
+    Symbolic CasADi implementation of the piecewise smooth function f2.
+    Args:
+        pwm_norm: CasADi SX or MX scalar, normalized PWM in [-1, 1]
+        voltage: CasADi SX or MX scalar, battery voltage
+    Returns:
+        thrust: CasADi SX or MX scalar, thrust value
+    """
+    voltage = ca.MX.sym('voltage')
+    pwm_norm = ca.MX.sym('pwm_norm')
+
+    a = 0.095
+    delta = 0.02
+    kL = 2.766 * voltage
+    kR = 3.556 * voltage
+
+    xL0 = -a - delta
+    xL1 = -a + delta
+    xR0 =  a - delta
+    xR1 =  a + delta
+    h = 2 * delta
+
+    def H00(t): return 1 - 10*t**3 + 15*t**4 - 6*t**5
+    def H10(t): return t - 6*t**3 + 8*t**4 - 3*t**5
+    def H01(t): return 10*t**3 - 15*t**4 + 6*t**5
+    def H11(t): return -4*t**3 + 7*t**4 - 3*t**5
+
+    L = lambda x: kL * (x + a)
+    R = lambda x: kR * (x - a)
+
+    x = pwm_norm
+
+    # left ramp
+    left = ca.if_else(x <= xL0, L(x), 0.0)
+
+    # left C² transition to 0
+    t_left = (x - xL0) / h
+    left_trans = ca.if_else(
+        ca.logic_and(x > xL0, x < xL1),
+        L(xL0)*H00(t_left) + h*kL*H10(t_left) + 0.0*H01(t_left) + h*0.0*H11(t_left),
+        0.0
+    )
+
+    # dead zone
+    dead = ca.if_else(ca.logic_and(x >= xL1, x <= xR0), 0.0, 0.0)
+
+    # right C² transition from 0
+    t_right = (x - xR0) / h
+    right_trans = ca.if_else(
+        ca.logic_and(x > xR0, x < xR1),
+        0.0*H00(t_right) + h*0.0*H10(t_right) + R(xR1)*H01(t_right) + h*kR*H11(t_right),
+        0.0
+    )
+
+    # right ramp
+    right = ca.if_else(x >= xR1, R(x), 0.0)
+
+    thrust = left + left_trans + dead + right_trans + right
+
+    return ca.Function('pwm_to_thrust', [pwm_norm, voltage], [thrust])
+
+def thrust_from_pwm()->ca.Function:
+    """
+    Symbolic CasADi implementation of the piecewise smooth function f2.
+    Args:
+        pwm_norm: CasADi SX or MX scalar, normalized PWM in [-1, 1]
+        voltage: CasADi SX or MX scalar, battery voltage
+    Returns:
+        thrust: CasADi SX or MX scalar, thrust value
+    """
+    pwm_norm = ca.MX.sym('pwm_norm')
+    voltage = ca.MX.sym('voltage')
+
+    L = ca.DM(2.5166)
+
+    a = 0.095
+    a = 0.02
+    delta = 0.02
+    kL = 2.766 * voltage
+    kR = 3.556 * voltage
+
+    xL0 = -a - delta
+    xL1 = -a + delta
+    xR0 =  a - delta
+    xR1 =  a + delta
+    h = 2 * delta
+
+    # Hermite basis functions as CasADi symbolic expressions for smooth transitions
+    def H00(t): return 1 - 10*t**3 + 15*t**4 - 6*t**5
+    def H10(t): return t - 6*t**3 + 8*t**4 - 3*t**5
+    def H01(t): return 10*t**3 - 15*t**4 + 6*t**5
+    def H11(t): return -4*t**3 + 7*t**4 - 3*t**5
+
+    t_left = (pwm_norm - xL0) / h
+    t_right = (pwm_norm - xR0) / h
+
+    thrust = ca.if_else(pwm_norm <= xL0, 
+                        kL * (pwm_norm + a),
+                        ca.if_else(pwm_norm <= xL1,
+                                kL * (xL0 + a) * H00(t_left) + h * kL * H10(t_left),
+                                    ca.if_else(pwm_norm < xR0, 
+                                            0.0,
+                                            ca.if_else(pwm_norm < xR1,
+                                                        kR * (xR1 - a) * H01(t_right) + h * kR * H11(t_right),
+                                                        kR * (pwm_norm - a)
+                                                        )
+                                            )
+                                    )
+                        )
+    
+    # thrust = L * voltage * pwm_norm
+
+    return ca.Function('pwm_to_thrust', [pwm_norm, voltage], [thrust])
+
+def thrust_from_pwm_vec(n=8) -> ca.Function:
+    pwm_vec = ca.MX.sym('pwm', n, 1)
+    V       = ca.MX.sym('V')
+
+    # f1 = pwm_to_thrust_scalar_tanh()
+    f1 = thrust_from_pwm()
+    fn = f1.map(n)  # elementwise map
+    # map expects (1 x n) inputs; reshape and broadcast V
+    thrust_1xn = fn(ca.reshape(pwm_vec, 1, n), ca.repmat(V, 1, n))
+    thrust_nx1 = ca.reshape(thrust_1xn, n, 1)
+    return ca.Function('pwm_to_thrust_vec', [pwm_vec, V], [thrust_nx1]).expand()
+
+def pwm_to_thrust_scalar_smooth() -> ca.Function:
+    pwm = ca.MX.sym('pwm')   # scalar in [-1,1]
+    V   = ca.MX.sym('V')     # scalar voltage
+
+    # parameters
+    a     = 0.095                 # dead-zone half width
+    beta  = 40.0                  # edge sharpness (30–100 works well)
+    kL    = 2.766 * V             # left slope
+    kR    = 3.556 * V             # right slope
+    eps   = 1e-9                  # for smooth abs
+
+    # smooth helpers
+    softplus = lambda z: (1.0/beta)*ca.log1p(ca.exp(beta*z))   # smooth ReLU
+    abs_s    = lambda z: ca.sqrt(z*z + eps)                    # smooth |z|
+
+    # smooth shrink with zero at 0 and ~0 inside [-a,a] but nonzero slope
+    shrink = ca.sign(pwm) * ( softplus(abs_s(pwm) - a) - softplus(-a) )
+
+    # split into smooth positive/negative parts to apply kR/kL
+    y_pos = 0.5*(shrink + abs_s(shrink))   # ≈ max(shrink,0)
+    y_neg = 0.5*(shrink - abs_s(shrink))   # ≈ min(shrink,0)
+
+    thrust = kR * y_pos + kL * y_neg
+    return ca.Function('pwm_to_thrust_scalar_smooth', [pwm, V], [thrust]).expand()
+
+def pwm_to_thrust_scalar_tanh():
+    pwm = ca.MX.sym('pwm')   # scalar in [-1,1]
+    V   = ca.MX.sym('V')     # scalar voltage
+
+    k = 10.0
+
+    tau_r = lambda z: 0.5 + 0.5 * ca.tanh(k*z)  # smooth step function
+    tau_l = lambda z: 0.5 - 0.5 * ca.tanh(k*z)  # smooth step function
+
+
+
+    a    = 0.095
+    # beta = 1.0/a             # ~10.526; tune 0.7/a .. 1.5/a
+    # eps  = 1e-9
+
+    kL = 2.766 * V
+    kR = 3.556 * V
+    m = 100.0
+
+    # abs_s = lambda z: ca.sqrt(z*z + eps)
+    # shrink = pwm - a * ca.tanh(beta * pwm)  # smooth “dead-zone”
+
+    # y_pos = 0.5*(shrink + abs_s(shrink))    # smooth max(shrink, 0)
+    # y_neg = 0.5*(shrink - abs_s(shrink))    # smooth min(shrink, 0)
+
+    # thrust = kR * y_pos + kL * y_neg
+
+    thrust = ((pwm/m) + a) * tau_r(pwm) + ((pwm/m) - a) * tau_l(pwm)
+    return ca.Function('pwm_to_thrust_scalar_tanh', [pwm, V], [thrust]).expand()
+
 # --- Main Routine ---
 
 def main():
@@ -936,137 +1120,32 @@ def main():
     
     plt.show()
 
-
-    def casadi_piecewise_smooth_thrust()->ca.Function:
-        """
-        Symbolic CasADi implementation of the piecewise smooth function f2.
-        Args:
-            pwm_norm: CasADi SX or MX scalar, normalized PWM in [-1, 1]
-            voltage: CasADi SX or MX scalar, battery voltage
-        Returns:
-            thrust: CasADi SX or MX scalar, thrust value
-        """
-        voltage = ca.MX.sym('voltage')
-        pwm_norm = ca.MX.sym('pwm_norm')
-
-        a = 0.095
-        delta = 0.02
-        kL = 2.766 * voltage
-        kR = 3.556 * voltage
-
-        xL0 = -a - delta
-        xL1 = -a + delta
-        xR0 =  a - delta
-        xR1 =  a + delta
-        h = 2 * delta
-
-        def H00(t): return 1 - 10*t**3 + 15*t**4 - 6*t**5
-        def H10(t): return t - 6*t**3 + 8*t**4 - 3*t**5
-        def H01(t): return 10*t**3 - 15*t**4 + 6*t**5
-        def H11(t): return -4*t**3 + 7*t**4 - 3*t**5
-
-        L = lambda x: kL * (x + a)
-        R = lambda x: kR * (x - a)
-
-        x = pwm_norm
-
-        # left ramp
-        left = ca.if_else(x <= xL0, L(x), 0.0)
-
-        # left C² transition to 0
-        t_left = (x - xL0) / h
-        left_trans = ca.if_else(
-            ca.logic_and(x > xL0, x < xL1),
-            L(xL0)*H00(t_left) + h*kL*H10(t_left) + 0.0*H01(t_left) + h*0.0*H11(t_left),
-            0.0
-        )
-
-        # dead zone
-        dead = ca.if_else(ca.logic_and(x >= xL1, x <= xR0), 0.0, 0.0)
-
-        # right C² transition from 0
-        t_right = (x - xR0) / h
-        right_trans = ca.if_else(
-            ca.logic_and(x > xR0, x < xR1),
-            0.0*H00(t_right) + h*0.0*H10(t_right) + R(xR1)*H01(t_right) + h*kR*H11(t_right),
-            0.0
-        )
-
-        # right ramp
-        right = ca.if_else(x >= xR1, R(x), 0.0)
-
-        thrust = left + left_trans + dead + right_trans + right
-
-        return ca.Function('pwm_to_thrust', [pwm_norm, voltage], [thrust])
-    
-    def thrust_from_pwm()->ca.Function:
-        """
-        Symbolic CasADi implementation of the piecewise smooth function f2.
-        Args:
-            pwm_norm: CasADi SX or MX scalar, normalized PWM in [-1, 1]
-            voltage: CasADi SX or MX scalar, battery voltage
-        Returns:
-            thrust: CasADi SX or MX scalar, thrust value
-        """
-        pwm_norm = ca.MX.sym('pwm_norm')
-        voltage = ca.MX.sym('voltage')
-
-        a = 0.095
-        delta = 0.02
-        kL = 2.766 * voltage
-        kR = 3.556 * voltage
-
-        xL0 = -a - delta
-        xL1 = -a + delta
-        xR0 =  a - delta
-        xR1 =  a + delta
-        h = 2 * delta
-
-        # Hermite basis functions as CasADi symbolic expressions for smooth transitions
-        def H00(t): return 1 - 10*t**3 + 15*t**4 - 6*t**5
-        def H10(t): return t - 6*t**3 + 8*t**4 - 3*t**5
-        def H01(t): return 10*t**3 - 15*t**4 + 6*t**5
-        def H11(t): return -4*t**3 + 7*t**4 - 3*t**5
-
-        t_left = (pwm_norm - xL0) / h
-        t_right = (pwm_norm - xR0) / h
-
-        thrust = ca.if_else(pwm_norm <= xL0, 
-                            kL * (pwm_norm + a),
-                            ca.if_else(pwm_norm <= xL1,
-                                    kL * (xL0 + a) * H00(t_left) + h * kL * H10(t_left),
-                                        ca.if_else(pwm_norm < xR0, 
-                                                0.0,
-                                                ca.if_else(pwm_norm < xR1,
-                                                            kR * (xR1 - a) * H01(t_right) + h * kR * H11(t_right),
-                                                            kR * (pwm_norm - a)
-                                                            )
-                                                )
-                                        )
-                            )
-
-        return ca.Function('pwm_to_thrust', [pwm_norm, voltage], [thrust])
-
     THRUST = casadi_piecewise_smooth_thrust()
     THRUST2 = thrust_from_pwm()
+    THRUST_VEC = thrust_from_pwm_vec(n=2)
+    THRUST_SCALAR = pwm_to_thrust_scalar_tanh()
 
     # Evaluate the CasADi symbolic function for different constant voltages over the full PWM range and plot against raw data
 
     x_plot = np.linspace(-1, 1, 400)
     voltages_to_plot = [12, 13.5, 14, 15, 16]
+    voltages_to_plot = [12, 14, 16]
 
     plt.figure()
     for V in voltages_to_plot:
         # Evaluate CasADi function for all x_plot at voltage V
         y_casadi = np.array([float(THRUST(x, V)) for x in x_plot])
         y_casadi2 = np.array([float(THRUST2(x, V)) for x in x_plot])
+        y_casadi_scalar = np.array([float(THRUST_SCALAR(x, V)) for x in x_plot])
+        print([THRUST_VEC(x, V) for x in x_plot])
         plt.plot(x_plot, y_casadi, linestyle='-.', label=f'CasADi V={V}V')
         plt.plot(x_plot, y_casadi2, linestyle='--', label=f'CasADi2 V={V}V')
+        plt.plot(x_plot, y_casadi_scalar, linestyle=':', label=f'CasADi Scalar V={V}V')
 
     # Plot raw data for comparison
-    plot_raw_data(data, x_key='pwm_norm', y_key='force',
-                  xlabel='PWM_norm', ylabel='Thrust [N]',
-                  title='Raw Thruster Data', voltages=[12, 14, 16])
+    # plot_raw_data(data, x_key='pwm_norm', y_key='force',
+    #               xlabel='PWM_norm', ylabel='Thrust [N]',
+    #               title='Raw Thruster Data', voltages=[12, 14, 16])
 
     plt.title('CasADi Piecewise Smooth Thrust vs Raw Data')
     plt.legend()
