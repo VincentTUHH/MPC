@@ -8,6 +8,7 @@ import casadi as ca
 from bluerov import dynamics_symbolic as sym_brv
 from uvms import model as uvms_model
 from uvms import Lumelsky
+from uvms.uvms_model import UVMSPlantSim
 
 from manipulator import (
     kinematics as manip_kin,
@@ -80,6 +81,7 @@ ATT0_QUAT = utils_math.euler_to_quat(ATT0_EULER[0], ATT0_EULER[1], ATT0_EULER[2]
 VEL0 = np.array([0.0, 0.0, 0.0])
 OMEGA0 = np.array([0.0, 0.0, 0.0])
 UVMS_MODEL_INSTANCE: Optional[uvms_model.UVMSModel] = None
+UVMS_SIM_INSTANCE: Optional[UVMSPlantSim] = None
 
 MANIP_PARAMS: Optional[dict] = None
 ALPHA_PARAMS: Optional[dict] = None
@@ -477,9 +479,10 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         cost += uk.T     @ R    @ uk
         cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
 
+        inflate = 0.01 * 2.0 # 1% margin on PWM limits
         if USE_PWM:
-            opti.subject_to(U[N_JOINTS:, k] <=  1.0)
-            opti.subject_to(U[N_JOINTS:, k] >= -1.0)
+            opti.subject_to(U[N_JOINTS:, k] <=  1.0 - inflate)
+            opti.subject_to(U[N_JOINTS:, k] >= -1.0 + inflate)
 
         # Joint position limits constraints
         opti.subject_to(U[0:N_JOINTS, k] <= JOINT_VELOCITIES[:N_JOINTS])
@@ -669,10 +672,12 @@ def run_mpc(
         #####
         xk = X_real[:, step]
         uk = U_appl[:, step]
-        u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1]
-        ddq_k = (uk[0:N_JOINTS] - u_prev0_val[0:N_JOINTS]) / dt
-        xkp1, _, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu0, f_eef_val, l_eef_val)
-        X_real[:, step+1] = xkp1.full().flatten()
+        # uk = uk + 0.001 * np.random.randn(CTRL_DIM)  # add small noise to simulate real application
+        # u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1]
+        # ddq_k = (uk[0:N_JOINTS] - u_prev0_val[0:N_JOINTS]) / dt
+        # xkp1, _, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu0, f_eef_val, l_eef_val)
+        # X_real[:, step+1] = xkp1.full().flatten()
+        X_real[:, step+1], _ = UVMS_SIM_INSTANCE.step(dt, xk, uk)
         #################################
 
 
@@ -730,7 +735,7 @@ def init_uvms_model(
 ) -> None:
     global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED, LUMELSKY, LUMELSKY_CASES, COLLISION, CONSTRAINT_COLLISION, CONSTRAINT_TANK
     global USE_QUATERNION, USE_PWM, USE_FIXED_POINT, FIXED_POINT_ITER, N_HORIZON, V_BAT, L, MIXER, M_INV, JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, INTEGRATOR, N_DOF, N_JOINTS, STATE_DIM, CTRL_DIM, C_FUN, D_FUN, G_FUN, J_FUN
-    global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, MANIP_KIN_REAL
+    global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, UVMS_SIM_INSTANCE, MANIP_KIN_REAL
     global MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS
 
     with _LOCK:
@@ -786,6 +791,18 @@ def init_uvms_model(
         CONSTRAINT_TANK = _constraint_tank()
 
         INITIALIZED = True
+
+        UVMS_SIM_INSTANCE = UVMSPlantSim(
+            use_quaternion=True,
+            use_pwm=True,
+            integrator="euler",
+            use_fixed_point=False,
+            v_bat=16.0,
+            brv_params_path=bluerov_params_path,
+            dh_params_path=dh_params_path,
+            manip_dyn_params_paths=manipulator_dyn_params_paths,
+        )
+        UVMS_SIM_INSTANCE.build()
 
         UVMS_MODEL_INSTANCE = uvms_model.UVMSModel(MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS, Q0, POS0, ATT0_EULER, VEL0, OMEGA0)
 
