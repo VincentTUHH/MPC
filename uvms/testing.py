@@ -232,15 +232,18 @@ def nullspace_adaption_fast(
 
     Returns dict with: status, w (2,), f (8,), w1_intervals, w2_intervals
     """
+    # Inflation of deadzone and saturation limits
+    inflation = 0.5 
+
     f_alt   = np.asarray(f_alt,   float).reshape(-1)
-    fdz_min = np.asarray(fdz_min, float).reshape(-1)
-    fdz_max = np.asarray(fdz_max, float).reshape(-1)
+    fdz_min = np.asarray(fdz_min - inflation, float).reshape(-1)
+    fdz_max = np.asarray(fdz_max + inflation, float).reshape(-1)
     n = f_alt.size
     assert n == 8, "This routine expects 8 thrusters."
     if fmin is None: fmin = -np.inf*np.ones(n)
     if fmax is None: fmax =  np.inf*np.ones(n)
-    fmin = np.asarray(fmin, float).reshape(-1)
-    fmax = np.asarray(fmax, float).reshape(-1)
+    fmin = np.asarray(fmin + inflation, float).reshape(-1)
+    fmax = np.asarray(fmax - inflation, float).reshape(-1)
 
     # Coefficients
     c1 = np.array([+0.5, +0.5, -0.5, -0.5])
@@ -394,11 +397,13 @@ def main():
 
     rng = np.random.default_rng(42)
     u_MPC = rng.uniform(-1, 1, size=(10, 8))
+    # u_MPC = -1.3 * np.ones((1, 8))
     # map each MPC PWM row to force vector and store in f_alts
     f_alts = np.array([model.map_mpc_pwm_to_force(u_row, V_batt) for u_row in u_MPC])
 
     f_min, f_max, f_dz_minus, f_dz_plus = model.get_force_limits(V_batt)
 
+    print(model.command_simple(0.3, V_batt))
     # generate 10 random f_alt vectors
     # rng = np.random.default_rng(42)
     # f_alts = rng.uniform(f_min, f_max, size=(10, 8))
@@ -430,14 +435,33 @@ def main():
         print(f"new: tau_v = {B @ f_alt_vec}")
         print(f"Solved in {t_diff*1000:.6f} ms.")
         if best['status'] == 'infeasible':
-            print("  No feasible pattern (deadzone + saturation).")
-            results.append(None)
+            print("  No feasible pattern (deadzone + saturation). Solving without saturation")
+            best = nullspace_adaption_fast(
+                f_alt_vec, f_dz_minus, f_dz_plus,
+                fmin=None, fmax=None, objective="f"
+            )
+            if best['status'] == 'infeasible':
+                print("  No feasible pattern even without saturation. Abort!!!")
+            else:
+                print("  Found feasible pattern without saturation.")
+                print(f"  w: {np.round(best.get('w'), 6)}")
+                print(f"  f*: {np.round(best.get('f'), 1)}")
+                results.append(best)
+                f_new = best.get('f')
+                results_u.append(np.array([(model.command_simple(f, V_batt)) for f in f_new]))
+                print(results_u[-1])
+                results_u[-1] = model.clip_pwm_saturation(results_u[-1])
+                print(results_u[-1])
+                plot_lane(
+                    f_alt_vec, best['f'], f_min, f_dz_minus, f_dz_plus, f_max,
+                    title=f"Sample {i}: Nullspace Adaption Result (no saturation)"
+                )
         else:
             print(f"  w: {np.round(best.get('w'), 6)}")
             print(f"  f*: {np.round(best.get('f'), 1)}")
             results.append(best)
             f_new = best.get('f')
-            results_u.append(np.array([(model.command_simple(f, V_batt)) for f in f_new]))
+            results_u.append(np.array([model.clip_pwm_saturation(model.command_simple(f, V_batt)) for f in f_new]))
             plot_lane(
                 f_alt_vec, best['f'], f_min, f_dz_minus, f_dz_plus, f_max,
                 title=f"Sample {i}: Nullspace Adaption Result"

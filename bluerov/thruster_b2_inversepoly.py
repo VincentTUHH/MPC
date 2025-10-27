@@ -283,7 +283,9 @@ class ThrusterInversePoly:
     
     def command_simple(self, f_des, V_meas):
         f = float(f_des); af = abs(f)
+        print(f)
         if af < self.f_dz:
+            print("in deadband")
             u = self._interp_scalar(V_meas, self.u0_map)
         else:
             if f > 0:
@@ -299,6 +301,14 @@ class ThrusterInversePoly:
                                            u_edge=u_edge, u_min=self.u_min, u_max=self.u_max)
                 u = min(u, u_edge)
         return u
+
+    def clip_pwm_saturation(self, u_cmd):
+        u_cmd = np.asarray(u_cmd).astype(float)
+        if self.u_min is not None:
+            u_cmd = np.maximum(u_cmd, self.u_min)
+        if self.u_max is not None:
+            u_cmd = np.minimum(u_cmd, self.u_max)
+        return u_cmd
     
     def map_mpc_pwm_to_force(self, u_cmd, V_meas):
         # The MPC PWM ouput must be the normalized command in [-1,1]
@@ -830,8 +840,8 @@ def main():
 
     print("Example:", "u( f=0.5N, V=15.0V, dt=0.02 ) =", model.command(0.5, 15.0, 0.02))
     print("Example:", "u( f=0.5N, V=15.0V, dt=0.02 ) =", model.command_simple(0.5, 15.0))
-    model.save(args.save)
-    print(f"Saved model to {args.save}")
+    # model.save(args.save)
+    # print(f"Saved model to {args.save}")
 
     _cli_plot(args, model, thruster_params_path)
 
