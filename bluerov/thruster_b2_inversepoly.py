@@ -283,9 +283,7 @@ class ThrusterInversePoly:
     
     def command_simple(self, f_des, V_meas):
         f = float(f_des); af = abs(f)
-        print(f)
         if af < self.f_dz:
-            print("in deadband")
             u = self._interp_scalar(V_meas, self.u0_map)
         else:
             if f > 0:
@@ -315,6 +313,178 @@ class ThrusterInversePoly:
         desired_thrust = self.L * V_meas * u_cmd
         return desired_thrust
 
+    def normalize_pwm(self, pwm):
+        return 2 * (pwm - self.u_min) / (self.u_max - self.u_min) - 1
+
+    def denormalize_pwm(self, pwm_norm):
+        return ((pwm_norm + 1) * (self.u_max - self.u_min) / 2) + self.u_min
+    
+    def _interval_intersection(self, a, b):
+        lo = max(a[0], b[0])
+        hi = min(a[1], b[1])
+        return (lo, hi) if lo <= hi else None
+
+    def _union_of_open_intervals(self, intervals):
+        if not intervals:
+            return []
+        segs = sorted(intervals, key=lambda x: (x[0], x[1]))
+        merged = []
+        cur_l, cur_r = segs[0]
+        for l, r in segs[1:]:
+            if l <= cur_r:
+                cur_r = max(cur_r, r)
+            else:
+                merged.append((cur_l, cur_r))
+                cur_l, cur_r = l, r
+        merged.append((cur_l, cur_r))
+        return merged
+
+    def _complement_of_open_union(self, merged_open, box=(-np.inf, np.inf)):
+        L, U = box
+        if L > U:
+            return []
+        if not merged_open:
+            return [(L, U)]
+        out = []
+        cur = L
+        for (l, r) in merged_open:
+            if r <= L or l >= U:
+                continue
+            l_clip = max(l, L)
+            r_clip = min(r, U)
+            if cur < l_clip:
+                out.append((cur, l_clip))
+            cur = max(cur, r_clip)
+        if cur <= U:
+            out.append((cur, U))
+        return [(a, b) for a, b in out if b >= a]
+
+    def _project_scalar_onto_union(self, x, intervals):
+        if not intervals:
+            return None, np.inf
+        for (L, U) in intervals:
+            if L <= x <= U:
+                return x, 0.0
+        best_x, best_d2 = None, np.inf
+        for (L, U) in intervals:
+            cand = U if abs(U - x) < abs(L - x) else L
+            d2 = (cand - x) ** 2
+            if d2 < best_d2:
+                best_x, best_d2 = cand, d2
+        return best_x, best_d2
+
+
+    def nullspace_adaption_fast(self, f_alt, fdz_min, fdz_max, fmin=None, fmax=None, objective="Nw"):
+        """
+        Fast global solver exploiting N structure for 8 thrusters:
+        f[:4] = f_alt[:4] + c1 * w1, c1=[+0.5,+0.5,-0.5,-0.5]
+        f[4:] = f_alt[4:] + 0.5 * w2
+        Build feasible unions for w1 and w2 from saturation and deadzone and project
+        the unconstrained minimizer onto those unions.
+        Returns dict {status,w,f,w1_intervals,w2_intervals}.
+        """
+        inflation = 0.5
+
+        f_alt = np.asarray(f_alt, float).reshape(-1)
+        fdz_min = np.asarray(fdz_min - inflation, float).reshape(-1)
+        fdz_max = np.asarray(fdz_max + inflation, float).reshape(-1)
+        n = f_alt.size
+        assert n == 8, "Expect 8 thrusters."
+
+        if fmin is None:
+            fmin = -np.inf * np.ones(n)
+        if fmax is None:
+            fmax = np.inf * np.ones(n)
+        fmin = np.asarray(fmin + inflation, float).reshape(-1)
+        fmax = np.asarray(fmax - inflation, float).reshape(-1)
+
+        c1 = np.array([+0.5, +0.5, -0.5, -0.5])
+        c2 = 0.5
+
+        # w1 saturation intersection
+        w1_sat_lo, w1_sat_hi = -np.inf, np.inf
+        for i in range(4):
+            fi, ci = f_alt[i], c1[i]
+            lo_i = (fmin[i] - fi) / ci
+            hi_i = (fmax[i] - fi) / ci
+            if lo_i > hi_i:
+                lo_i, hi_i = hi_i, lo_i
+            inter = self._interval_intersection((w1_sat_lo, w1_sat_hi), (lo_i, hi_i))
+            if inter is None:
+                return dict(status="infeasible", w=None, f=None, w1_intervals=[], w2_intervals=[])
+            w1_sat_lo, w1_sat_hi = inter
+
+        forb_w1 = []
+        for i in range(4):
+            fi, ci = f_alt[i], c1[i]
+            a = (fdz_min[i] - fi) / ci
+            b = (fdz_max[i] - fi) / ci
+            if a > b:
+                a, b = b, a
+            forb_w1.append((a, b))
+        forb_w1 = self._union_of_open_intervals(forb_w1)
+        w1_intervals = self._complement_of_open_union(forb_w1, box=(w1_sat_lo, w1_sat_hi))
+        if not w1_intervals:
+            return dict(status="infeasible", w=None, f=None, w1_intervals=[], w2_intervals=[])
+
+        # w2 saturation intersection
+        lo_list = (fmin[4:8] - f_alt[4:8]) / c2
+        hi_list = (fmax[4:8] - f_alt[4:8]) / c2
+        w2_sat_lo = np.max(np.minimum(lo_list, hi_list))
+        w2_sat_hi = np.min(np.maximum(lo_list, hi_list))
+        if w2_sat_lo > w2_sat_hi:
+            return dict(status="infeasible", w=None, f=None, w1_intervals=w1_intervals, w2_intervals=[])
+
+        a = (fdz_min[4:8] - f_alt[4:8]) / c2
+        b = (fdz_max[4:8] - f_alt[4:8]) / c2
+        forb_w2 = self._union_of_open_intervals(list(zip(np.minimum(a, b), np.maximum(a, b))))
+        w2_intervals = self._complement_of_open_union(forb_w2, box=(w2_sat_lo, w2_sat_hi))
+        if not w2_intervals:
+            return dict(status="infeasible", w=None, f=None, w1_intervals=w1_intervals, w2_intervals=[])
+
+        if objective == "Nw":
+            w1_free = 0.0
+            w2_free = 0.0
+        elif objective == "f":
+            w1_free = -np.sum(c1 * f_alt[:4])
+            w2_free = -0.5 * np.sum(f_alt[4:8])
+        else:
+            raise ValueError("objective must be 'Nw' or 'f'.")
+
+        w1, _ = self._project_scalar_onto_union(w1_free, w1_intervals)
+        w2, _ = self._project_scalar_onto_union(w2_free, w2_intervals)
+
+        f = np.empty(8, float)
+        f[:4] = f_alt[:4] + c1 * w1
+        f[4:] = f_alt[4:] + c2 * w2
+
+        return dict(status="optimal", w=np.array([w1, w2]), f=f, w1_intervals=w1_intervals, w2_intervals=w2_intervals)
+
+    def thruster_adaption(self, u_MPC, V_batt):
+        u_MPC = np.asarray(u_MPC, dtype=float).reshape(1, -1)
+        f_alt = np.array(self.map_mpc_pwm_to_force(u_MPC, V_batt)).reshape(-1)
+
+        f_min, f_max, f_dz_minus, f_dz_plus = self.get_force_limits(V_batt)
+
+        n_thruster = int(u_MPC.shape[1])
+        f_min = np.full(n_thruster, f_min, dtype=float)
+        f_max = np.full(n_thruster, f_max, dtype=float)
+        f_dz_minus = np.full(n_thruster, f_dz_minus, dtype=float)
+        f_dz_plus = np.full(n_thruster, f_dz_plus, dtype=float)
+
+        best = self.nullspace_adaption_fast(
+            f_alt, f_dz_minus, f_dz_plus, fmin=f_min, fmax=f_max, objective="f"
+        )
+        if best["status"] == "infeasible":
+            # print("No feasible pattern (deadzone + saturation). Solving without saturation")
+            best = self.nullspace_adaption_fast(f_alt, f_dz_minus, f_dz_plus, fmin=None, fmax=None, objective="f")
+            if best["status"] == "infeasible":
+                raise RuntimeError("No feasible pattern even without saturation.")
+        f_new = best.get("f")
+        u_new = np.array([self.command_simple(f, V_batt) for f in f_new])
+        u_new = self.clip_pwm_saturation(u_new)
+        return u_new
+    
     def save(self, path):
         arrV = self.voltages
         def _pack(m): return json.dumps({str(v): m[v].tolist() for v in arrV})
