@@ -171,6 +171,42 @@ class ThrusterInversePoly:
         self._in_deadband = True
         self._last_u = None
 
+    def get_force_limits(self, V):
+        """
+        Return (f_min, f_max, f_dz_minus, f_dz_plus) for a given battery voltage V.
+        Simpler: evaluate the forward/reverse polynomials at the PWM endpoints
+        (deadband edge and u_min/u_max) instead of sampling.
+        """
+        # require PWM endpoints to be defined
+        if self.u_max is None or self.u_min is None:
+            raise ValueError("Model must define both u_min and u_max before computing force limits.")
+        V = float(V)
+        # blended coeffs for this voltage
+        a_fwd = self._blend_forward_coeffs(V, side="fwd")
+        a_rev = self._blend_forward_coeffs(V, side="rev")
+
+        # evaluate polynomials at endpoints
+        f_max = float(_poly_eval_forward(a_fwd, self.u_max))
+        f_min = float(_poly_eval_forward(a_rev, self.u_min))
+
+        return f_min, f_max, -float(self.f_dz), float(self.f_dz)
+    
+    def get_pwm_limits(self, V):
+        """
+        Return (u_min, u_max, u_dz_minus, u_dz_plus) for a given battery voltage V.
+        u_dz_plus is the PWM corresponding to +f_dz, u_dz_minus corresponds to -f_dz.
+        """
+        # require PWM endpoints to be defined
+        if self.u_max is None or self.u_min is None:
+            raise ValueError("Model must define both u_min and u_max before computing PWM limits.")
+        V = float(V)
+
+        # deadband edge PWMs (interpolated)
+        u_dz_plus = float(self._interp_scalar(V, self.uplus_map))
+        u_dz_minus = float(self._interp_scalar(V, self.uminus_map))
+
+        return float(self.u_min), float(self.u_max), u_dz_minus, u_dz_plus
+
     def _interp_scalar(self, V, value_map):
         # Die Funktion liefert den PWM Wert an der Grenze zur Dead Zone für eine gegebene Spannung V
         # also den PWM Wert, um die kleinstmögliche Kraft zu erzeugen, bevor die Dead Zone betreten wird.
