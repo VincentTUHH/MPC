@@ -14,7 +14,8 @@ class BlueROVDynamicsSymbolic:
         self.damping_linear = ca.DM(np.array(params['damping_linear']))
         self.damping_nonlinear = ca.DM(np.array(params['damping_nonlinear']))
         self.gravity = ca.DM(9.81)
-        self.L = ca.DM(2.5166) # scaling factor for PWM to thrust conversion
+        # self.L = ca.DM(2.5166) # scaling factor for PWM to thrust conversion from thruster_model.py
+        self.L = ca.DM(2.50336) # scaling factor for PWM to thrust conversion (updated value from thruster_b2_inversepoly.py, considering V=12V, 14V, 16V)
 
         self.M = self.compute_mass_matrix()
         self.M_inv = ca.pinv(self.M)  # Inverse of the mass matrix

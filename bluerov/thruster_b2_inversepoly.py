@@ -145,7 +145,7 @@ def _invert_forward_coeffs(a, f_star, side, u_edge, u_min=None, u_max=None):
 
 
 class ThrusterInversePoly:
-    def __init__(self, voltages, f_eps, f_dz, deg, a_fwd, a_rev,
+    def __init__(self, voltages, f_eps, f_dz, deg, L, a_fwd, a_rev,
                  u0_map, uminus_map, uplus_map,
                  tau_volt=0.02, hysteresis=1.2, u_min=None, u_max=None,
                  f_max_all=None, f_min_all=None,
@@ -154,6 +154,7 @@ class ThrusterInversePoly:
         self.f_eps = float(f_eps)
         self.f_dz = float(f_dz)
         self.deg = int(deg)
+        self.L = float(L)
         self.a_fwd = {float(v): np.array(c) for v,c in a_fwd.items()}
         self.a_rev = {float(v): np.array(c) for v,c in a_rev.items()}
         self.u0_map = {float(k): float(v) for k, v in u0_map.items()}
@@ -298,13 +299,17 @@ class ThrusterInversePoly:
                                            u_edge=u_edge, u_min=self.u_min, u_max=self.u_max)
                 u = min(u, u_edge)
         return u
-
+    
+    def map_mpc_pwm_to_force(self, u_cmd, V_meas):
+        # The MPC PWM ouput must be the normalized command in [-1,1]
+        desired_thrust = self.L * V_meas * u_cmd
+        return desired_thrust
 
     def save(self, path):
         arrV = self.voltages
         def _pack(m): return json.dumps({str(v): m[v].tolist() for v in arrV})
         np.savez(path,
-                 voltages=arrV, f_eps=self.f_eps, f_dz=self.f_dz, deg=self.deg,
+                 voltages=arrV, f_eps=self.f_eps, f_dz=self.f_dz, deg=self.deg, L=self.L,
                  a_fwd=_pack(self.a_fwd), a_rev=_pack(self.a_rev),
                  u0_vals=np.array([self.u0_map[v] for v in arrV]),
                  uminus_vals=np.array([self.uminus_map[v] for v in arrV]),
@@ -326,7 +331,7 @@ class ThrusterInversePoly:
         uplus_map  = {float(v): float(u) for v,u in zip(arrV, d['uplus_vals'].astype(float))}
         u_min = None if np.isnan(d["u_min"]).any() else float(d["u_min"])
         u_max = None if np.isnan(d["u_max"]).any() else float(d["u_max"])
-        return cls(voltages=arrV, f_eps=float(d['f_eps']), f_dz=float(d['f_dz']), deg=deg,
+        return cls(voltages=arrV, f_eps=float(d['f_eps']), f_dz=float(d['f_dz']), deg=deg, L = float(d['L']),
                    a_fwd=a_fwd, a_rev=a_rev,
                    u0_map=u0_map, uminus_map=uminus_map, uplus_map=uplus_map,
                    tau_volt=float(d['tau_volt']), hysteresis=float(d['hysteresis']),
@@ -392,7 +397,10 @@ def train_from_folder(thruster_params_path, f_eps=0.1, f_dz=0.3, deg=2, lam=1e-6
             slope = (-f_dz - np.min(f)) / max((u_minus - np.min(pwm)), 1e-6)
             a_rev[V] = np.array([-f_dz - slope*u_minus, slope] + [0.0]*(deg-1))
 
-    return ThrusterInversePoly(voltages=voltages, f_eps=f_eps, f_dz=f_dz, deg=deg,
+    lm = find_linear_model(thruster_params_path=thruster_params_path, voltages=None, u_min=u_min)
+    L = lm['L']
+
+    return ThrusterInversePoly(voltages=voltages, f_eps=f_eps, f_dz=f_dz, deg=deg, L=L,
                                a_fwd=a_fwd, a_rev=a_rev,
                                u0_map=u0_map, uminus_map=uminus_map, uplus_map=uplus_map,
                                tau_volt=tau_volt, hysteresis=hysteresis,
@@ -638,6 +646,157 @@ def _cli_plot(args, model, thruster_params_path):
     if (save is None):
         plt.show()
 
+def find_linear_model(thruster_params_path=None, voltages=None, u_min=1100):
+    """
+    Compute linear slope K per voltage so that thrust = K * pwm passes through (0,0)
+    and through the measured thrust at pwm = u_min. Returns dict with Ks and best-fit L.
+
+    If thruster_params_path is None, uses bluerov package default data folder.
+    voltages: iterable of voltages to process (defaults to [12,14,16,18]).
+    """
+    if voltages is None:
+        voltages = [12.0, 14.0, 16.0]
+    voltages = [float(v) for v in voltages]
+
+    if thruster_params_path is None:
+        bluerov_package_path = get_package_path('bluerov')
+        thruster_params_path = bluerov_package_path + "/thruster_data/"
+
+    data = utils_math.load_all_thruster_data(thruster_params_path)
+
+    Ks = {}
+    used_closest = {}
+    for V in voltages:
+        if V not in data:
+            print(f"V={V}: no data, skipping")
+            continue
+        pwm = np.asarray(data[V].get('pwm', [])).astype(float)
+        f = np.asarray(data[V].get('force', [])).astype(float)
+        if pwm.size == 0 or f.size == 0:
+            print(f"V={V}: empty data arrays, skipping")
+            continue
+
+        # find samples exactly at u_min, else pick closest sample
+        idx = np.where(np.isclose(pwm, float(u_min)))[0]
+        if idx.size == 0:
+            idx = np.array([int(np.argmin(np.abs(pwm - float(u_min))))])
+            used_closest[V] = True
+        else:
+            used_closest[V] = False
+
+        f_at_u_min = float(np.min(f[idx]))  # user requested the minimum thrust at that pwm
+        K = -f_at_u_min # assuming normalized pwm [-1,1]
+        Ks[V] = K
+        print(f"V={V:g}: f_at_u_min={f_at_u_min:.6g}, K={K:.6g} (used_closest={used_closest[V]})")
+
+    if len(Ks) == 0:
+        raise RuntimeError("No valid voltages/data found to compute K.")
+
+    Vs = np.array(list(Ks.keys()), dtype=float)
+    Ks_arr = np.array([Ks[v] for v in Vs], dtype=float)
+
+    # Fit L in model K ≈ L * V  -> minimize sum((K - L*V)^2)
+    # closed form: L = sum(V_i * K_i) / sum(V_i^2)
+    numer = np.sum(Vs * Ks_arr)
+    denom = np.sum(Vs**2)
+    L = float(numer / denom)
+
+    K_pred = L * Vs
+    resid = Ks_arr - K_pred
+    rmse = float(np.sqrt(np.mean(resid**2)))
+
+    print("")
+    print("Summary:")
+    for i, v in enumerate(Vs):
+        print(f" V={v:g}: K_obs={Ks_arr[i]:.6g}, K_pred={K_pred[i]:.6g}, err={resid[i]:.6g}")
+    print(f"\nBest-fit L = {L:.6g}  (RMSE on K = {rmse:.6g})")
+
+    def _norm_pwm_piecewise(pwm_array, u_min=1100, u_mid=1500, u_max=1900):
+        pwm_array = np.asarray(pwm_array, dtype=float)
+        norm = np.empty_like(pwm_array, dtype=float)
+
+        # below neutral -> map [u_min, u_mid] -> [-1, 0]
+        mask_lo = pwm_array <= u_mid
+        norm[mask_lo] = (pwm_array[mask_lo] - u_mid) / (u_min - u_mid)  # denominator negative
+        # above neutral -> map [u_mid, u_max] -> [0, 1]
+        mask_hi = ~mask_lo
+        norm[mask_hi] = (pwm_array[mask_hi] - u_mid) / (u_max - u_mid)
+        # clip for any outliers
+        return np.clip(norm, -1.0, 1.0)
+
+    def plot_raw_and_linear(L=None, thruster_params_path=None, voltages=None, u_min=1100, u_max=1900, show_per_voltage=False):
+        """
+        Plots:
+        1) Raw thrust-vs-PWM scatter for each requested voltage
+        2) Linear characteristics using thrust = (L * V) * PWM_norm
+
+        - Uses your find_linear_model() to get L.
+        - Normalizes PWM piecewise around neutral (1500 µs) so both sides hit ±1.
+        """
+        if voltages is None:
+            voltages = [12.0, 14.0, 16.0]  # extend to 18 if you have data
+
+        # Load the same data dict used by your function
+        if thruster_params_path is None:
+            bluerov_package_path = get_package_path('bluerov')
+            thruster_params_path = bluerov_package_path + "/thruster_data/"
+        data = utils_math.load_all_thruster_data(thruster_params_path)
+
+        # Combined plot
+        plt.figure()
+        for V in voltages:
+            if V not in data:
+                print(f"V={V}: no data, skipping")
+                continue
+            pwm = np.asarray(data[V].get('pwm', [])).astype(float)
+            f = np.asarray(data[V].get('force', [])).astype(float)
+            if pwm.size == 0 or f.size == 0:
+                print(f"V={V}: empty data arrays, skipping")
+                continue
+
+            # Raw scatter
+            plt.scatter(pwm, f, s=12, label=f"{V:g} V raw")
+
+            # Linear model curve: thrust = (L*V)*pwm_norm
+            pwm_sorted = np.linspace(max(min(pwm.min(), u_min), 800), min(max(pwm.max(), u_max), 2200), 200)
+            pwm_norm = np.linspace(-1, 1, 200)
+            f_lin = (L * float(V)) * pwm_norm
+            plt.plot(pwm_sorted, f_lin, linewidth=2, label=f"{V:g} V linear")
+
+        plt.title("Thruster force vs PWM (raw) with linear model overlay")
+        plt.xlabel("PWM [µs]")
+        plt.ylabel("Force [N]")
+        plt.grid(True, which="both", linestyle="--", alpha=0.4)
+        plt.legend()
+        plt.tight_layout()
+
+        if show_per_voltage:
+            # Optional: per-voltage panels
+            for V in voltages:
+                if V not in data:
+                    continue
+                pwm = np.asarray(data[V].get('pwm', [])).astype(float)
+                f = np.asarray(data[V].get('force', [])).astype(float)
+                if pwm.size == 0 or f.size == 0:
+                    continue
+                plt.figure()
+                plt.scatter(pwm, f, s=14, label=f"{V:g} V raw")
+                pwm_sorted = np.linspace(max(min(pwm.min(), u_min), 800), min(max(pwm.max(), u_max), 2200), 200)
+                pwm_norm = _norm_pwm_piecewise(pwm_sorted, u_min=u_min, u_mid=1500, u_max=u_max)
+                f_lin = (L * float(V)) * pwm_norm
+                plt.plot(pwm_sorted, f_lin, linewidth=2, label=f"{V:g} V linear")
+                plt.title(f"Thruster force vs PWM at {V:g} V")
+                plt.xlabel("PWM [µs]")
+                plt.ylabel("Force [N]")
+                plt.grid(True, which="both", linestyle="--", alpha=0.4)
+                plt.legend()
+                plt.tight_layout()
+        plt.show()
+
+    plot_raw_and_linear(L=L,thruster_params_path=thruster_params_path, voltages=voltages, u_min=u_min, show_per_voltage=False)
+
+    return {"Ks": Ks, "L": L, "Vs": Vs, "K_pred": dict(zip(Vs.tolist(), K_pred.tolist())), "rmse_K": rmse}
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", default=None, help="Folder for CSVs (utils_math loader).")
@@ -650,7 +809,7 @@ def main():
     ap.add_argument("--hyst", type=float, default=1.2, help="Deadband hysteresis factor")
     ap.add_argument("--u_min", type=float, default=1100, help="Lower PWM bound")
     ap.add_argument("--u_max", type=float, default=1900, help="Upper PWM bound")
-    ap.add_argument("--save", type=str, default="bluerov/thruster_models/thruster_inversepoly_deg2.npz", help="Output model file")
+    ap.add_argument("--save", type=str, default="bluerov/thruster_models/thruster_inversepoly_deg3.npz", help="Output model file")
     ap.add_argument("--plot", nargs='?', const=True, default=False, help="Plot forward fits; optional filename.")
     ap.add_argument("--plot_voltages", nargs='*', default=None, help="Limit plot to specific voltages")
     ap.add_argument("--plot-voltages", nargs='?', default=None, help="Optional list of voltages to plot (comma- or space-separated, or multiple args).")
@@ -668,7 +827,6 @@ def main():
     
     print("")
     print(f"RMS Error total [mus]: forward = {model.rmse_fwd:.4f}, reverse = {model.rmse_rev:.4f}, \n")
-
 
     print("Example:", "u( f=0.5N, V=15.0V, dt=0.02 ) =", model.command(0.5, 15.0, 0.02))
     print("Example:", "u( f=0.5N, V=15.0V, dt=0.02 ) =", model.command_simple(0.5, 15.0))

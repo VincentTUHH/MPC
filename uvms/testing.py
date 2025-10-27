@@ -391,11 +391,17 @@ def main():
     model = ThrusterInversePoly.load(thruster_model_path)
 
     V_batt = 15.0  # Voltage
+
+    rng = np.random.default_rng(42)
+    u_MPC = rng.uniform(-1, 1, size=(10, 8))
+    # map each MPC PWM row to force vector and store in f_alts
+    f_alts = np.array([model.map_mpc_pwm_to_force(u_row, V_batt) for u_row in u_MPC])
+
     f_min, f_max, f_dz_minus, f_dz_plus = model.get_force_limits(V_batt)
 
     # generate 10 random f_alt vectors
-    rng = np.random.default_rng(42)
-    f_alts = rng.uniform(f_min, f_max, size=(10, 8))
+    # rng = np.random.default_rng(42)
+    # f_alts = rng.uniform(f_min, f_max, size=(10, 8))
     u_alts = np.array([model.command_simple(f, V_batt) for f in f_alts.flatten()]).reshape(f_alts.shape)
 
     # expand scalar limits to 8-element vectors for each thruster
