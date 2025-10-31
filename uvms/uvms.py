@@ -91,10 +91,10 @@ def _constraint_tank() -> ca.Function:
     vehicle_bound = ca.MX.sym('vehicle_bound', 7)
     underarm_bound = ca.MX.sym('underarm_bound', 7) # swept-sphere
 
-    beta_smoothmin = ca.DM(10.0)
-    safety_margin = ca.DM(0.05)
-    beta_margin = ca.DM(0.2) # must be greater than safety_margin
-    eta_weight = ca.DM(4.0)
+    beta_smoothmin = ca.DM(10.0) # 10.0
+    safety_margin = ca.DM(0.05) # [m] 0.05
+    beta_margin = ca.DM(0.2) # [m] 0.2 must be greater than safety_margin
+    eta_weight = ca.DM(20.0) # vorher nur 4.0, mit 50.0 geht es, wenn ich mit eef voraus gegen wand fahre
 
     p1_vehicle = vehicle_bound[0:3]
     p2_vehicle = vehicle_bound[3:6]
@@ -168,7 +168,7 @@ def _constraint_collision(collision_test: ca.Function) -> ca.Function:
     p_vehicle_pill_offset = ca.DM([0.0, 0.1375, 0.0]) # offset to pill end points left and right (L=0.275m/2)
     safety_margin = ca.DM(0.02) # meters # alpha_L
     beta_margin = ca.DM(0.05) # must be greater than safety_margin
-    eta_weight = ca.DM(10.0)
+    eta_weight = ca.DM(10.0) # vorher 10.0
     p_unit = ca.DM([1.0, 0.0, 0.0])
 
     # p_underarm1 = p_eef + utils_sym.quaternion_rotation(att_eef, p_eef_offset)
@@ -436,10 +436,10 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
     opti.subject_to(X[:, 0] == x0p)
 
     # --- weights (tune as you like) ---
-    Qpos = ca.DM.eye(3) * 100.0
+    Qpos = ca.DM.eye(3) * 10.0 #100
     Qvel = ca.DM.eye(N_DOF) * 1.0
     R    = ca.DM.eye(CTRL_DIM) * 1e-4
-    Rdu  = ca.DM.eye(CTRL_DIM) * 1e-3
+    Rdu  = ca.DM.eye(CTRL_DIM) * 7.0 # 1e-3
 
     # --- rollout over horizon ---
     u_prev = Uprev0
@@ -672,7 +672,7 @@ def run_mpc(
         #####
         xk = X_real[:, step]
         uk = U_appl[:, step]
-        # uk = uk + 0.001 * np.random.randn(CTRL_DIM)  # add small noise to simulate real application
+        uk = uk + 0.1 * np.random.randn(CTRL_DIM)  # add small noise to simulate real application
         # u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1]
         # ddq_k = (uk[0:N_JOINTS] - u_prev0_val[0:N_JOINTS]) / dt
         # xkp1, _, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu0, f_eef_val, l_eef_val)
@@ -722,6 +722,7 @@ def check_fixed_point(q, nu, eta, uq, uv, ddq_in, dnu_g, quat, f_eef, l_eef):
 
 def init_uvms_model(
     bluerov_params_path: str = 'model_params.yaml',
+    bluerov_params_disturbed_path: str = 'model_params_disturbed.yaml',
     dh_params_path: str = 'alpha_kin_params.yaml',
     joint_limits_path: Optional[str] = None,
     manipulator_dyn_params_paths: Optional[list[str]] = None,
@@ -751,6 +752,7 @@ def init_uvms_model(
         N_HORIZON = n_horizon
 
         BRV_PARAMS = utils_math.load_model_params(bluerov_params_path)
+        BRV_PARAMS_DISTURBED = utils_math.load_model_params(bluerov_params_disturbed_path)
         BLUEROV_DYN = sym_brv.BlueROVDynamicsSymbolic(BRV_PARAMS)
 
         MANIP_PARAMS = utils_math.load_dh_params(dh_params_path)
@@ -804,7 +806,7 @@ def init_uvms_model(
         )
         UVMS_SIM_INSTANCE.build()
 
-        UVMS_MODEL_INSTANCE = uvms_model.UVMSModel(MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS, Q0, POS0, ATT0_EULER, VEL0, OMEGA0)
+        UVMS_MODEL_INSTANCE = uvms_model.UVMSModel(MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS_DISTURBED, Q0, POS0, ATT0_EULER, VEL0, OMEGA0)
 
 def is_initialized() -> bool:
     return INITIALIZED
@@ -823,6 +825,7 @@ def teardown_for_tests() -> None:
 def main():
     bluerov_package_path = get_package_path('bluerov')
     bluerov_params_path = bluerov_package_path + "/config/model_params.yaml"
+    bluerov_params_disturbed_path = bluerov_package_path + "/config/model_params_disturbed.yaml"
 
     manipulator_package_path = get_package_path('manipulator')
     dh_params_path = manipulator_package_path + "/config/alpha_kin_params.yaml"
@@ -838,6 +841,7 @@ def main():
    
     init_uvms_model(
         bluerov_params_path=bluerov_params_path,
+        bluerov_params_disturbed_path=bluerov_params_disturbed_path,
         dh_params_path=dh_params_path,
         joint_limits_path=joint_limits_path,
         manipulator_dyn_params_paths=manipulator_dyn_params_paths,
@@ -846,7 +850,7 @@ def main():
         use_fixed_point=False,
         v_bat=16.0,
         fixed_point_iter=2,
-        n_horizon=10
+        n_horizon=20 # vorher mit 10 (=0.5s vorausschau bei dt = 0.05) hat es nicht funktioniert
     )
 
     T_duration = 10.0 # [s]
@@ -854,7 +858,7 @@ def main():
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
     # veh_pos_ref_val = np.array([0.8, 0.0, -0.1])  # desired vehicle position for station-keeping
-    veh_pos_ref_val = np.array([3.0, 2.0, -0.7])  # desired vehicle position for station-keeping
+    veh_pos_ref_val = np.array([-3.0, 2.0, -0.7])  # desired vehicle position for station-keeping
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}

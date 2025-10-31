@@ -1,17 +1,17 @@
 /**: # wildcard for the node name
   ros__parameters:
     model:
-      mass: 14.7 # rigid body mass
-      inertia: [ 0.25, 0.25, 0.4 ]  # rigid body inertia
+      mass: 14.9 # rigid body mass
+      inertia: [ 0.27, 0.265, 0.37 ]  # rigid body inertia
       #inertia: [ 0.15, 0.15, 0.2 ]  # rigid body inertia
       cog: [ 0.0, 0.0, 0.0 ]
-      added_mass: [ 9.3, 14.2, 18.0, 0.14, 0.13, 0.2 ]
+      added_mass: [ 9.3, 14.2, 17.0, 0.11, 0.13, 0.27 ]
       #added_mass: [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ]
-      buoyancy: 14.40 #14.45  # equivalent mass for buoyancy (buoyancy force = buoyancy * -g)
+      buoyancy: 14.31 #14.45  # equivalent mass for buoyancy (buoyancy force = buoyancy * -g)
       cob: [ 0.0, 0.0, 0.33 ] # [ 0.006, 0.0, 0.031 ]# center of buoyancy
-      damping_linear: [ 9.5, 12.0, 15.0, 0.5, 0.5, 0.5 ]
+      damping_linear: [ 9.5, 13.1, 15.0, 0.4, 0.3, 0.35 ]
       #damping_linear: [1.0, 1.0, 1.0, 0.3, 0.3, 0.3 ]
-      damping_nonlinear: [ 40.0, 39.1, 80.0, 1.0, 1.2, 1.5 ]
+      damping_nonlinear: [ 38.4, 39.1, 80.7, 1.0, 1.2, 1.4 ]
       #damping_nonlinear: [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 ]
 
     manipulator_comp:
@@ -24,7 +24,7 @@
         # added compensation buoyancy_mass: mass_weights -buoyancy_weights - mass_plate + buoyancy_plate
         # origin: origin_weights * (mass_weights - buoyancy_weights) - origin_plate * (mass_plate - buoyancy_plate)
       origin:
-        x: 0.086
-        y: 0.0
-        z: -0.109
-      buoyancy_mass: 0.899 # must be equal to parameter in xacro file for BlueROV, buoyancy = relative_compensation
+        x: 0.096
+        y: 0.05
+        z: -0.113
+      buoyancy_mass: 0.839 # must be equal to parameter in xacro file for BlueROV, buoyancy = relative_compensation
