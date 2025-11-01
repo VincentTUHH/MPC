@@ -784,7 +784,7 @@ def plot_forward_and_inverse_fits(thruster_params_path, model, save_path=None, s
 
     plt.xlabel("PWM [µs]")
     plt.ylabel("Thrust f [N]")
-    plt.title("Forward fits f(u) per voltage (with raw data)")
+    plt.title("Forward and inverse fits")
     plt.grid(True)
     plt.legend(fontsize='small', ncol=2)
     if save_path:
@@ -796,29 +796,34 @@ def plot_forward_and_inverse_fits(thruster_params_path, model, save_path=None, s
 def _cli_plot(args, model, thruster_params_path):
     if not getattr(args, "plot", False):
         return
+    
+    voltages = None
+    if not getattr(args, "plot_voltages", None):
+        voltages = [float(v) for v in model.voltages]
+    else:
+        # parse optional voltage list from several possible arg names
+        volt_arg = None
+        for attr in ("plot_voltages", "plot-voltages", "plot_vs", "plot_v"):
+            if hasattr(args, attr) and getattr(args, attr) is not None:
+                volt_arg = getattr(args, attr)
+                break
 
-    # parse optional voltage list from several possible arg names
-    volt_arg = None
-    for attr in ("plot_voltages", "plot-voltages", "plot_vs", "plot_v"):
-        if hasattr(args, attr) and getattr(args, attr) is not None:
-            volt_arg = getattr(args, attr)
-            break
-
-    # helper parse: allow list, comma/space-separated string
-    def _parse_voltage_list(s):
-        if s is None:
-            return None
-        if isinstance(s, (list, tuple)):
-            return [float(x) for x in s]
-        if isinstance(s, str):
-            toks = [t for t in s.replace(',', ' ').split() if t]
-            return [float(t) for t in toks]
-        # single numeric
-        try:
-            return [float(s)]
-        except Exception:
-            return None
-    voltages = _parse_voltage_list(volt_arg)
+        # helper parse: allow list, comma/space-separated string
+        def _parse_voltage_list(s):
+            if s is None:
+                return None
+            if isinstance(s, (list, tuple)):
+                return [float(x) for x in s]
+            if isinstance(s, str):
+                toks = [t for t in s.replace(',', ' ').split() if t]
+                return [float(t) for t in toks]
+            # single numeric
+            try:
+                return [float(s)]
+            except Exception:
+                return None
+        voltages = _parse_voltage_list(volt_arg)
+    print(f"Plotting fits for voltages: {voltages}")
     save = args.plot if isinstance(args.plot, str) else None
     plot_forward_fits(thruster_params_path, model, save_path=save, show=(save is None), voltages_to_plot=voltages)
     plot_inverse_fits(thruster_params_path, model, save_path=save, show=(save is None), voltages_to_plot=voltages)
@@ -935,7 +940,7 @@ def find_linear_model(thruster_params_path=None, voltages=None, u_min=1100):
                 continue
 
             # Raw scatter
-            plt.scatter(pwm, f, s=12, label=f"{V:g} V raw")
+            plt.scatter(pwm, f, s=6, alpha=0.35, label=f"{V:g} V raw")
 
             # Linear model curve: thrust = (L*V)*pwm_norm
             pwm_sorted = np.linspace(max(min(pwm.min(), u_min), 800), min(max(pwm.max(), u_max), 2200), 200)
@@ -943,7 +948,7 @@ def find_linear_model(thruster_params_path=None, voltages=None, u_min=1100):
             f_lin = (L * float(V)) * pwm_norm
             plt.plot(pwm_sorted, f_lin, linewidth=2, label=f"{V:g} V linear")
 
-        plt.title("Thruster force vs PWM (raw) with linear model overlay")
+        plt.title("Thruster force vs PWM (raw) with linear model overlay for MPC")
         plt.xlabel("PWM [µs]")
         plt.ylabel("Force [N]")
         plt.grid(True, which="both", linestyle="--", alpha=0.4)
