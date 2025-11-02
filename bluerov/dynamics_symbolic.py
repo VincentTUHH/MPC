@@ -14,13 +14,15 @@ class BlueROVDynamicsSymbolic:
         self.damping_linear = ca.DM(np.array(params['damping_linear']))
         self.damping_nonlinear = ca.DM(np.array(params['damping_nonlinear']))
         self.gravity = ca.DM(9.81)
-        self.L = ca.DM(2.5166) # scaling factor for PWM to thrust conversion
+        # self.L = ca.DM(2.5166) # scaling factor for PWM to thrust conversion from thruster_model.py
+        self.L = ca.DM(2.50336) # scaling factor for PWM to thrust conversion (updated value from thruster_b2_inversepoly.py, considering V=12V, 14V, 16V)
 
         self.M = self.compute_mass_matrix()
         self.M_inv = ca.pinv(self.M)  # Inverse of the mass matrix
 
         self.mixer = self.get_mixer_matrix_wu2018()
         self.mixer_inv = ca.pinv(self.mixer)
+        self.mixer_nullspace = self.nullspace_mixer_matrix(self.mixer)
 
     def get_mixer_matrix_niklas(self):
         # Thruster geometry parameters (from YAML or vehicle config)
@@ -88,6 +90,16 @@ class BlueROVDynamicsSymbolic:
 
         mixer = ca.DM(mixer_np)
         return mixer
+    
+    def nullspace_mixer_matrix(self,mixer: ca.DM):
+        mixer_np = np.array(mixer)   # or mixer.full()
+        U, S, Vh = np.linalg.svd(mixer_np, full_matrices=True)
+        V = Vh.T
+        tol = np.finfo(float).eps * max(mixer.shape) * S[0]
+        r = np.sum(S > tol)
+        N = V[:, r:]   # right nullspace basis
+        N[np.abs(N) < 1e-6] = 0.0  # Enforce exact zeros for small values
+        return ca.DM(N)
 
     def compute_mass_matrix(self):
         M_rb = ca.DM.zeros(6, 6)

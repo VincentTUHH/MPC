@@ -1,0 +1,1247 @@
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Thruster mapping with *forward* polynomial fits f(u)=thrust per voltage & side,
+but the model STORES/USES the **inverse** u = f^{-1}(f_des).
+
+- deg ∈ {2,3,4}
+- For deg=2: analytic quadratic inverse (fast, exact)
+- For deg>=3: robust real-root solve within valid domain (uses numpy.roots)
+- Deadband edges enforced (no PWM in deadzone when |f|>f_eps)
+- Voltage blending: blend forward coefficients across the two nearest voltages,
+  then invert that blended polynomial for the requested thrust.
+
+CLI usage example: 
+python3 -m bluerov.thruster_b2_inversepoly --deg 2 --plot --plot-voltages 14,15,16
+"""
+
+import argparse
+import json
+import numpy as np
+import cvxpy as cp
+import matplotlib.pyplot as plt
+
+from common import utils_math
+from common.my_package_path import get_package_path
+
+
+def _deadband_from_voltage_series(f, u, f_eps):
+    f = np.asarray(f).reshape(-1)
+    u = np.asarray(u).reshape(-1)
+
+    mask0 = np.abs(f) < f_eps
+    if np.any(mask0):
+        u0 = float(np.median(u[mask0]))
+        order = np.argsort(u)
+        u_s = u[order]
+        mask0_s = mask0[order]
+        idxs = np.where(mask0_s)[0]
+        runs = np.split(idxs, np.where(np.diff(idxs) != 1)[0] + 1) if len(idxs) else []
+        if runs:
+            best = min(runs, key=lambda r: np.min(np.abs(u_s[r] - u0)))
+            s, e = best[0], best[-1]
+            u_minus = float(u_s[s] if s==0 else u_s[s-1])
+            u_plus  = float(u_s[e] if e==len(u_s)-1 else u_s[e+1])
+        else:
+            u_minus = float(np.percentile(u[mask0], 25))
+            u_plus  = float(np.percentile(u[mask0], 75))
+        return u0, u_minus, u_plus
+
+    idx = np.argsort(np.abs(f))[:max(10, len(f)//20)]
+    u0 = float(np.median(u[idx]))
+    u_minus = float(np.percentile(u[idx], 25))
+    u_plus  = float(np.percentile(u[idx], 75))
+    return u0, u_minus, u_plus
+
+
+def _fit_forward_poly(u, f, deg, u_anchor=None, f_anchor=None, lam=1e-6, monotone=True, u_bounds=None):
+    u = np.asarray(u).reshape(-1).astype(float)
+    f = np.asarray(f).reshape(-1).astype(float)
+    if len(u) == 0:
+        raise ValueError("No data points for fit.")
+
+    Phi = np.column_stack([u**k for k in range(deg+1)])
+    a = cp.Variable(deg+1)
+    obj = cp.sum_squares(Phi @ a - f) + lam*cp.sum_squares(a)
+    cons = []
+    if (u_anchor is not None) and (f_anchor is not None):
+        ua = float(u_anchor); fa = float(f_anchor)
+        cons.append(cp.sum([a[k]*(ua**k) for k in range(deg+1)]) == fa)
+    prob = cp.Problem(cp.Minimize(obj), cons)
+    prob.solve(solver=cp.OSQP, verbose=False)
+    if a.value is None:
+        prob.solve(verbose=False)
+    if a.value is None:
+        raise RuntimeError("Forward polynomial fit failed.")
+    coeffs = np.array(a.value).reshape(-1)
+    rmse = float(np.sqrt(np.mean((Phi @ coeffs - f)**2)))
+    return coeffs, rmse
+
+
+def _poly_eval_forward(a, u):
+    u = np.asarray(u, dtype=float)
+    y = np.zeros_like(u) + a[-1]
+    for k in range(len(a)-2, -1, -1):
+        y = y*u + a[k]
+    return y
+
+
+def _invert_forward_coeffs(a, f_star, side, u_edge, u_min=None, u_max=None):
+    # Inverts the polynomial f(u) with coefficients a at f_star, to get the PWM command u.
+    # u_edge: PWM at deadband edge for mininal non-zero force f_eps
+    a = np.asarray(a).reshape(-1)
+    deg = len(a)-1
+    f_star = float(f_star)
+
+    p = a.copy()
+    p[0] = p[0] - f_star
+    coeff_desc = p[::-1]
+
+    if deg == 1:
+        b1, b0 = a[1], a[0]
+        if abs(b1) < 1e-12:
+            u = u_edge
+        else:
+            u = (f_star - b0)/b1
+    elif deg == 2:
+        A, B, C = a[2], a[1], a[0]-f_star
+        if abs(A) < 1e-12:
+            if abs(B) < 1e-12:
+                u = u_edge
+            else:
+                u = -C/B
+        else:
+            D = B*B - 4*A*C
+            if D < 0:
+                u = u_edge
+            else:
+                sqrtD = np.sqrt(D)
+                u1 = (-B + sqrtD)/(2*A)
+                u2 = (-B - sqrtD)/(2*A)
+                cand = []
+                if side == "fwd":
+                    if u1 >= u_edge: cand.append(u1)
+                    if u2 >= u_edge: cand.append(u2)
+                    u = max(cand) if cand else u_edge
+                else:
+                    if u1 <= u_edge: cand.append(u1)
+                    if u2 <= u_edge: cand.append(u2)
+                    u = min(cand) if cand else u_edge
+    else:
+        roots = np.roots(coeff_desc)
+        roots = roots[np.isreal(roots)].real
+        if side == "fwd":
+            roots = roots[roots >= u_edge - 1e-9]
+            u = float(np.min(roots)) if roots.size else u_edge
+        else:
+            roots = roots[roots <= u_edge + 1e-9]
+            u = float(np.max(roots)) if roots.size else u_edge
+
+    # clip
+    # if u_min is not None: u = max(u, u_min)
+    # if u_max is not None: u = min(u, u_max)
+    return float(u)
+
+
+class ThrusterInversePoly:
+    def __init__(self, voltages, f_eps, f_dz, deg, L, a_fwd, a_rev,
+                 u0_map, uminus_map, uplus_map,
+                 tau_volt=0.02, hysteresis=1.2, u_min=None, u_max=None,
+                 f_max_all=None, f_min_all=None,
+                 rmse_fwd=None, rmse_rev=None):
+        self.voltages = np.array(sorted([float(v) for v in voltages]))
+        self.f_eps = float(f_eps)
+        self.f_dz = float(f_dz)
+        self.deg = int(deg)
+        self.L = float(L)
+        self.a_fwd = {float(v): np.array(c) for v,c in a_fwd.items()}
+        self.a_rev = {float(v): np.array(c) for v,c in a_rev.items()}
+        self.u0_map = {float(k): float(v) for k, v in u0_map.items()}
+        self.uminus_map = {float(k): float(v) for k, v in uminus_map.items()}
+        self.uplus_map = {float(k): float(v) for k, v in uplus_map.items()}
+        self.tau_volt = float(tau_volt)
+        self.hysteresis = float(hysteresis)
+        self.u_min = u_min
+        self.u_max = u_max
+        self.f_max_all = f_max_all
+        self.f_min_all = f_min_all
+        self.rmse_fwd = np.mean(list(rmse_fwd.values())) if rmse_fwd else None
+        self.rmse_rev = np.mean(list(rmse_rev.values())) if rmse_rev else None
+        self._Vf = None
+        self._in_deadband = True
+        self._last_u = None
+
+    def get_force_limits(self, V):
+        """
+        Return (f_min, f_max, f_dz_minus, f_dz_plus) for a given battery voltage V.
+        Simpler: evaluate the forward/reverse polynomials at the PWM endpoints
+        (deadband edge and u_min/u_max) instead of sampling.
+        """
+        # require PWM endpoints to be defined
+        if self.u_max is None or self.u_min is None:
+            raise ValueError("Model must define both u_min and u_max before computing force limits.")
+        V = float(V)
+        # blended coeffs for this voltage
+        a_fwd = self._blend_forward_coeffs(V, side="fwd")
+        a_rev = self._blend_forward_coeffs(V, side="rev")
+
+        # evaluate polynomials at endpoints
+        f_max = float(_poly_eval_forward(a_fwd, self.u_max))
+        f_min = float(_poly_eval_forward(a_rev, self.u_min))
+
+        return f_min, f_max, -float(self.f_dz), float(self.f_dz)
+    
+    def get_pwm_limits(self, V):
+        """
+        Return (u_min, u_max, u_dz_minus, u_dz_plus) for a given battery voltage V.
+        u_dz_plus is the PWM corresponding to +f_dz, u_dz_minus corresponds to -f_dz.
+        """
+        # require PWM endpoints to be defined
+        if self.u_max is None or self.u_min is None:
+            raise ValueError("Model must define both u_min and u_max before computing PWM limits.")
+        V = float(V)
+
+        # deadband edge PWMs (interpolated)
+        u_dz_plus = float(self._interp_scalar(V, self.uplus_map))
+        u_dz_minus = float(self._interp_scalar(V, self.uminus_map))
+
+        return float(self.u_min), float(self.u_max), u_dz_minus, u_dz_plus
+
+    def _interp_scalar(self, V, value_map):
+        # Die Funktion liefert den PWM Wert an der Grenze zur Dead Zone für eine gegebene Spannung V
+        # also den PWM Wert, um die kleinstmögliche Kraft zu erzeugen, bevor die Dead Zone betreten wird.
+        # Liegt V außerhalb des Spannungsbereichs, wird der PWM -Grenz-Wert der
+        # nächstgelegenen Spannung zurückgegeben
+        # Liegt V innerhalb des Spannungsbereichs, wird der PWM-Grenz-Wert linear interpoliert
+        # zwischen den Werten der beiden nächstgelegenen Spannungen
+        V = float(V); arrV = self.voltages
+        if V <= arrV[0]: return value_map[arrV[0]]
+        if V >= arrV[-1]: return value_map[arrV[-1]]
+        j = np.searchsorted(arrV, V)
+        V0, V1 = arrV[j-1], arrV[j]
+        t = (V - V0)/(V1 - V0 + 1e-12)
+        return (1-t)*value_map[V0] + t*value_map[V1]
+
+    def _blend_forward_coeffs(self, V, side="fwd"):
+        # Die Funktion liefert Koeffizienten der gefitteten Polynome für eine gegebene Spannung V, 
+        # entweder für die Vorwärts- oder Rückwärtscharakteristik
+        # liegt V außerhalb des Spannungsbereichs, werden die Koeffizienten der 
+        # nächstgelegenen Spannung zurückgegeben
+        # liegt V innerhalb des Spannungsbereichs, werden die Koeffizienten linear interpoliert
+        # zwischen den beiden nächstgelegenen Spannungen
+        arrV = self.voltages
+        V = float(V)
+        if V <= arrV[0]:
+            return self.a_fwd[arrV[0]] if side=="fwd" else self.a_rev[arrV[0]]
+        if V >= arrV[-1]:
+            return self.a_fwd[arrV[-1]] if side=="fwd" else self.a_rev[arrV[-1]]
+        j = np.searchsorted(arrV, V)
+        V0, V1 = arrV[j-1], arrV[j]
+        t = (V - V0)/(V1 - V0 + 1e-12)
+        c0 = self.a_fwd[V0] if side=="fwd" else self.a_rev[V0]
+        c1 = self.a_fwd[V1] if side=="fwd" else self.a_rev[V1]
+        return (1-t)*c0 + t*c1
+
+    def command(self, f_des, V_meas, dt, rate_limit=None):
+        if self._Vf is None:
+            self._Vf = float(V_meas)
+        alpha = float(np.exp(-dt / max(self.tau_volt, 1e-6)))
+        self._Vf = alpha*self._Vf + (1-alpha)*float(V_meas)
+        V = float(self._Vf)
+
+        f = float(f_des); af = abs(f)
+        if self._in_deadband:
+            if af > self.hysteresis*self.f_dz:
+                self._in_deadband = False
+        else:
+            if af < self.f_dz/self.hysteresis:
+                self._in_deadband = True
+
+        if self._in_deadband:
+            u = self._interp_scalar(V, self.u0_map)
+        else:
+            if f > 0:
+                a = self._blend_forward_coeffs(V, side="fwd")
+                u_edge = self._interp_scalar(V, self.uplus_map)
+                u = _invert_forward_coeffs(a, f_star=f, side="fwd",
+                                           u_edge=u_edge, u_min=self.u_min, u_max=self.u_max)
+                u = max(u, u_edge)
+            else:
+                a = self._blend_forward_coeffs(V, side="rev")
+                u_edge = self._interp_scalar(V, self.uminus_map)
+                u = _invert_forward_coeffs(a, f_star=f, side="rev",
+                                           u_edge=u_edge, u_min=self.u_min, u_max=self.u_max)
+                u = min(u, u_edge)
+
+        if rate_limit is not None and rate_limit > 0 and self._last_u is not None:
+            step = rate_limit * dt
+            u = float(np.clip(u, self._last_u - step, self._last_u + step))
+
+        self._last_u = float(u)
+        return float(u)
+    
+    def command_simple(self, f_des, V_meas):
+        f = float(f_des); af = abs(f)
+        if af < self.f_dz:
+            u = self._interp_scalar(V_meas, self.u0_map)
+        else:
+            if f > 0:
+                a = self._blend_forward_coeffs(V_meas, side="fwd")
+                u_edge = self._interp_scalar(V_meas, self.uplus_map)
+                u = _invert_forward_coeffs(a, f_star=f, side="fwd",
+                                           u_edge=u_edge, u_min=self.u_min, u_max=self.u_max)
+                u = max(u, u_edge)
+            else:
+                a = self._blend_forward_coeffs(V_meas, side="rev")
+                u_edge = self._interp_scalar(V_meas, self.uminus_map)
+                u = _invert_forward_coeffs(a, f_star=f, side="rev",
+                                           u_edge=u_edge, u_min=self.u_min, u_max=self.u_max)
+                u = min(u, u_edge)
+        return u
+
+    def pwm_to_force(self, u, V_meas):
+        """
+        Evaluate fitted forward polynomials to map PWM -> thrust at given voltage.
+        - u may be scalar or array-like (PWM in [u_min,u_max])
+        - V_meas: battery voltage used for blending coefficients
+        - returns scalar or numpy array of forces (same shape as input)
+        Deadband between interpolated u_minus and u_plus yields zero force.
+        """
+        V = float(V_meas)
+        u_arr = np.asarray(u, dtype=float)
+
+        # clip to saturation if defined
+        if self.u_min is not None or self.u_max is not None:
+            lo = -np.inf if self.u_min is None else float(self.u_min)
+            hi =  np.inf if self.u_max is None else float(self.u_max)
+            u_arr = np.clip(u_arr, lo, hi)
+
+        u0 = float(self._interp_scalar(V, self.u0_map))
+        u_minus = float(self._interp_scalar(V, self.uminus_map))
+        u_plus  = float(self._interp_scalar(V, self.uplus_map))
+
+        # prepare output
+        out = np.zeros_like(u_arr, dtype=float)
+
+        # forward region (above deadband)
+        mask_fwd = (u_arr > u_plus)
+        if np.any(mask_fwd):
+            a_fwd = self._blend_forward_coeffs(V, side="fwd")
+            out[mask_fwd] = _poly_eval_forward(a_fwd, u_arr[mask_fwd])
+
+        # reverse region (below deadband)
+        mask_rev = (u_arr < u_minus)
+        if np.any(mask_rev):
+            a_rev = self._blend_forward_coeffs(V, side="rev")
+            out[mask_rev] = _poly_eval_forward(a_rev, u_arr[mask_rev])
+
+        # deadband (u in [u_minus, u_plus]) remains zero
+        # preserve scalar return if input was scalar
+        if np.isscalar(u):
+            return float(out)
+        return out
+
+    def clip_pwm_saturation(self, u_cmd):
+        u_cmd = np.asarray(u_cmd).astype(float)
+        if self.u_min is not None:
+            u_cmd = np.maximum(u_cmd, self.u_min)
+        if self.u_max is not None:
+            u_cmd = np.minimum(u_cmd, self.u_max)
+        return u_cmd
+    
+    def map_mpc_pwm_to_force(self, u_cmd, V_meas):
+        # The MPC PWM ouput must be the normalized command in [-1,1]
+        desired_thrust = self.L * V_meas * u_cmd
+        return desired_thrust
+
+    def normalize_pwm(self, pwm):
+        return 2 * (pwm - self.u_min) / (self.u_max - self.u_min) - 1
+
+    def denormalize_pwm(self, pwm_norm):
+        return ((pwm_norm + 1) * (self.u_max - self.u_min) / 2) + self.u_min
+    
+    # def _interval_intersection(self, a, b):
+    #     lo = max(a[0], b[0])
+    #     hi = min(a[1], b[1])
+    #     return (lo, hi) if lo <= hi else None
+
+    # def _union_of_open_intervals(self, intervals):
+    #     if not intervals:
+    #         return []
+    #     segs = sorted(intervals, key=lambda x: (x[0], x[1]))
+    #     merged = []
+    #     cur_l, cur_r = segs[0]
+    #     for l, r in segs[1:]:
+    #         if l <= cur_r:
+    #             cur_r = max(cur_r, r)
+    #         else:
+    #             merged.append((cur_l, cur_r))
+    #             cur_l, cur_r = l, r
+    #     merged.append((cur_l, cur_r))
+    #     return merged
+
+    # def _complement_of_open_union(self, merged_open, box=(-np.inf, np.inf)):
+    #     L, U = box
+    #     if L > U:
+    #         return []
+    #     if not merged_open:
+    #         return [(L, U)]
+    #     out = []
+    #     cur = L
+    #     for (l, r) in merged_open:
+    #         if r <= L or l >= U:
+    #             continue
+    #         l_clip = max(l, L)
+    #         r_clip = min(r, U)
+    #         if cur < l_clip:
+    #             out.append((cur, l_clip))
+    #         cur = max(cur, r_clip)
+    #     if cur <= U:
+    #         out.append((cur, U))
+    #     return [(a, b) for a, b in out if b >= a]
+
+    def _project_scalar_onto_union(self, x, intervals):
+        if not intervals:
+            return None, np.inf
+        for (L, U) in intervals:
+            if L <= x <= U:
+                return x, 0.0
+        best_x, best_d2 = None, np.inf
+        for (L, U) in intervals:
+            cand = U if abs(U - x) < abs(L - x) else L
+            d2 = (cand - x) ** 2
+            if d2 < best_d2:
+                best_x, best_d2 = cand, d2
+        return best_x, best_d2
+
+    def _intersect_box(self, intervals, box):
+        """
+        Intersect a union of CLOSED intervals with one CLOSED box [L, U].
+        intervals: list of (L, U), closed.
+        box: (Lbox, Ubox), closed.
+        """
+        if not intervals:
+            return []
+        Lb, Ub = box
+        out = []
+        for L, U in intervals:
+            L2 = max(L, Lb)
+            U2 = min(U, Ub)
+            if L2 <= U2:
+                out.append((L2, U2))
+        return out
+
+    def _subtract_open(self, intervals, open_seg):
+        """
+        Subtract one OPEN interval (l, r) from a union of CLOSED intervals.
+        Returns union of CLOSED intervals.
+        """
+        l, r = open_seg
+        if not intervals or l >= r:
+            return intervals
+        out = []
+        for L, U in intervals:
+            # disjoint → unchanged
+            if U <= l or r <= L:
+                out.append((L, U))
+                continue
+            # overlap → keep closed remainders (left includes l, right includes r)
+            if L <= l:
+                out.append((L, min(U, l)))   # left remainder (closed)
+            if r <= U:
+                out.append((max(L, r), U))   # right remainder (closed)
+        # drop degenerates
+        return [(a, b) for (a, b) in out if a <= b]
+
+    def _intersect_outside_deadzone(self, intervals, a, b):
+        """
+        Intersect existing CLOSED intervals with the set (-inf, a] ∪ [b, +inf),
+        implemented as subtracting the OPEN gap (a, b).
+        """
+        return self._subtract_open(intervals, (a, b))
+    
+    def _build_feasible_w1(self, f_alt, fmin, fmax, fdz_min, fdz_max):
+        c1 = np.array([+0.5, +0.5, -0.5, -0.5])
+        # start with all real line as one closed interval
+        intervals = [(-np.inf, +np.inf)]
+        # 1) intersect saturation (closed box per thruster)
+        for i in range(4):
+            fi, ci = f_alt[i], c1[i]
+            lo = (fmin[i] - fi) / ci
+            hi = (fmax[i] - fi) / ci
+            if lo > hi: lo, hi = hi, lo
+            intervals = self._intersect_box(intervals, (lo, hi))
+            if not intervals:
+                return []
+        # 2) subtract each deadzone open gap
+        for i in range(4):
+            fi, ci = f_alt[i], c1[i]
+            a = (fdz_min[i] - fi) / ci
+            b = (fdz_max[i] - fi) / ci
+            if a > b: a, b = b, a
+            intervals = self._intersect_outside_deadzone(intervals, a, b)
+            if not intervals:
+                return []
+        return intervals
+
+    def _build_feasible_w2(self, f_alt, fmin, fmax, fdz_min, fdz_max):
+        c2 = 0.5
+        intervals = [(-np.inf, +np.inf)]
+        # 1) saturation
+        for i in range(4, 8):
+            fi = f_alt[i]
+            lo = (fmin[i] - fi) / c2
+            hi = (fmax[i] - fi) / c2
+            if lo > hi: lo, hi = hi, lo
+            intervals = self._intersect_box(intervals, (lo, hi))
+            if not intervals:
+                return []
+        # 2) deadzone gaps
+        for i in range(4, 8):
+            fi = f_alt[i]
+            a = (fdz_min[i] - fi) / c2
+            b = (fdz_max[i] - fi) / c2
+            if a > b: a, b = b, a
+            intervals = self._intersect_outside_deadzone(intervals, a, b)
+            if not intervals:
+                return []
+        return intervals
+    
+    def nullspace_adaption_fast(self, f_alt, fdz_min, fdz_max, fmin=None, fmax=None, objective="Nw"):
+        inflation = 0.5  # keep your current margin if you want
+
+        f_alt   = np.asarray(f_alt, float).reshape(-1)
+        n = f_alt.size
+        assert n == 8, "Expect 8 thrusters."
+
+        # inflate/deflate as you already do
+        fdz_min = np.asarray(fdz_min - inflation, float).reshape(-1)
+        fdz_max = np.asarray(fdz_max + inflation, float).reshape(-1)
+        if fmin is None: fmin = -np.inf * np.ones(n)
+        if fmax is None: fmax =  np.inf * np.ones(n)
+        fmin = np.asarray(fmin + inflation, float).reshape(-1)
+        fmax = np.asarray(fmax - inflation, float).reshape(-1)
+
+        # --- build feasible unions robustly
+        W1 = self._build_feasible_w1(f_alt, fmin, fmax, fdz_min, fdz_max)
+        W2 = self._build_feasible_w2(f_alt, fmin, fmax, fdz_min, fdz_max)
+        if not W1 or not W2:
+            return dict(status="infeasible", w=None, f=None, w1_intervals=W1, w2_intervals=W2)
+
+        # --- unconstrained minimizers (same as before)
+        c1 = np.array([+0.5, +0.5, -0.5, -0.5]); c2 = 0.5
+        if objective == "Nw":
+            w1_free, w2_free = 0.0, 0.0
+        elif objective == "f":
+            w1_free = -np.sum(c1 * f_alt[:4])
+            w2_free = -0.5 * np.sum(f_alt[4:8])
+        else:
+            raise ValueError("objective must be 'Nw' or 'f'.")
+
+        # --- project (your projector is fine)
+        w1, _ = self._project_scalar_onto_union(w1_free, W1)
+        w2, _ = self._project_scalar_onto_union(w2_free, W2)
+
+        # --- build f and assert
+        f = np.empty(8, float)
+        f[:4] = f_alt[:4] + c1 * w1
+        f[4:] = f_alt[4:] + c2 * w2
+
+        eps = 1e-12
+        ok = np.all((f <= fdz_min + eps) | (f >= fdz_max - eps))
+        if not ok:
+            print("Deadzone violation detected after adaptation. f =", f)
+            raise AssertionError("Deadzone violation detected after adaptation")
+
+        return dict(status="optimal", w=np.array([w1, w2]),
+                    f=f, w1_intervals=W1, w2_intervals=W2)
+
+    def mpc_thruster_command_adaption(self, u_mpc, V_batt=16.0): #f_alt, fdz_min, fdz_max, fmin=None, fmax=None, objective="Nw", V_batt=16.0):
+        u_mpc   = np.asarray(u_mpc, float).reshape(-1)
+        n_thruster = u_mpc.size
+        assert n_thruster == 8, "Expect 8 thrusters."
+
+        # f: minimize force norm
+        # Nw: minimize norm of nullspace component
+        objective = "f"
+        
+        f_mpc = self.map_mpc_pwm_to_force(u_mpc, V_meas=V_batt)  # V_meas is a placeholder here
+        f_min, f_max, f_dz_minus, f_dz_plus = self.get_force_limits(V_batt)
+
+        f_min = np.full(n_thruster, f_min, dtype=float)
+        f_max = np.full(n_thruster, f_max, dtype=float)
+        f_dz_minus = np.full(n_thruster, f_dz_minus, dtype=float)
+        f_dz_plus = np.full(n_thruster, f_dz_plus, dtype=float)
+
+
+        result = self.nullspace_adaption_fast(f_mpc, f_dz_minus, f_dz_plus, fmin=f_min, fmax=f_max, objective=objective)
+        if result['status'] != "optimal":
+            result = self.nullspace_adaption_fast(f_mpc, f_dz_minus, f_dz_plus, fmin=None, fmax=None, objective=objective)
+            if result['status'] != "optimal":
+                raise RuntimeError("Thruster command adaption failed: no solution found.")
+        u_adapted = np.array([self.command_simple(f, V_batt) for f in result['f']])
+        u_adapted = self.clip_pwm_saturation(u_adapted)
+        return u_adapted
+
+
+    # def nullspace_adaption_fast(self, f_alt, fdz_min, fdz_max, fmin=None, fmax=None, objective="Nw"):
+    #     """
+    #     Fast global solver exploiting N structure for 8 thrusters:
+    #     f[:4] = f_alt[:4] + c1 * w1, c1=[+0.5,+0.5,-0.5,-0.5]
+    #     f[4:] = f_alt[4:] + 0.5 * w2
+    #     Build feasible unions for w1 and w2 from saturation and deadzone and project
+    #     the unconstrained minimizer onto those unions.
+    #     Returns dict {status,w,f,w1_intervals,w2_intervals}.
+    #     """
+    #     inflation = 0.5
+
+    #     f_alt = np.asarray(f_alt, float).reshape(-1)
+    #     fdz_min = np.asarray(fdz_min - inflation, float).reshape(-1)
+    #     fdz_max = np.asarray(fdz_max + inflation, float).reshape(-1)
+    #     n = f_alt.size
+    #     assert n == 8, "Expect 8 thrusters."
+
+    #     if fmin is None:
+    #         fmin = -np.inf * np.ones(n)
+    #     if fmax is None:
+    #         fmax = np.inf * np.ones(n)
+    #     fmin = np.asarray(fmin + inflation, float).reshape(-1)
+    #     fmax = np.asarray(fmax - inflation, float).reshape(-1)
+
+    #     c1 = np.array([+0.5, +0.5, -0.5, -0.5])
+    #     c2 = 0.5
+
+    #     # w1 saturation intersection
+    #     w1_sat_lo, w1_sat_hi = -np.inf, np.inf
+    #     for i in range(4):
+    #         fi, ci = f_alt[i], c1[i]
+    #         lo_i = (fmin[i] - fi) / ci
+    #         hi_i = (fmax[i] - fi) / ci
+    #         if lo_i > hi_i:
+    #             lo_i, hi_i = hi_i, lo_i
+    #         inter = self._interval_intersection((w1_sat_lo, w1_sat_hi), (lo_i, hi_i))
+    #         if inter is None:
+    #             return dict(status="infeasible", w=None, f=None, w1_intervals=[], w2_intervals=[])
+    #         w1_sat_lo, w1_sat_hi = inter
+
+    #     print("w1_sat_box:", (w1_sat_lo, w1_sat_hi))
+    #     forb_w1 = []
+    #     for i in range(4):
+    #         fi, ci = f_alt[i], c1[i]
+    #         a = (fdz_min[i] - fi) / ci
+    #         b = (fdz_max[i] - fi) / ci
+    #         if a > b:
+    #             a, b = b, a
+    #         forb_w1.append((a, b))
+    #     print("forbidden_w1:", forb_w1)
+    #     forb_w1 = self._union_of_open_intervals(forb_w1)
+    #     w1_intervals = self._complement_of_open_union(forb_w1, box=(w1_sat_lo, w1_sat_hi))
+    #     print("w1_intervals:", w1_intervals)
+    #     if not w1_intervals:
+    #         return dict(status="infeasible", w=None, f=None, w1_intervals=[], w2_intervals=[])
+
+    #     # w2 saturation intersection
+    #     lo_list = (fmin[4:8] - f_alt[4:8]) / c2
+    #     hi_list = (fmax[4:8] - f_alt[4:8]) / c2
+    #     w2_sat_lo = np.max(np.minimum(lo_list, hi_list))
+    #     w2_sat_hi = np.min(np.maximum(lo_list, hi_list))
+    #     if w2_sat_lo > w2_sat_hi:
+    #         return dict(status="infeasible", w=None, f=None, w1_intervals=w1_intervals, w2_intervals=[])
+
+    #     print("w2_sat_box:", (w2_sat_lo, w2_sat_hi))
+    #     a = (fdz_min[4:8] - f_alt[4:8]) / c2
+    #     b = (fdz_max[4:8] - f_alt[4:8]) / c2
+    #     print("forbidden_w2:", list(zip(np.minimum(a, b), np.maximum(a, b))))
+    #     forb_w2 = self._union_of_open_intervals(list(zip(np.minimum(a, b), np.maximum(a, b))))
+    #     w2_intervals = self._complement_of_open_union(forb_w2, box=(w2_sat_lo, w2_sat_hi))
+    #     print("w2_intervals:", w2_intervals)
+    #     if not w2_intervals:
+    #         return dict(status="infeasible", w=None, f=None, w1_intervals=w1_intervals, w2_intervals=[])
+
+    #     if objective == "Nw":
+    #         w1_free = 0.0
+    #         w2_free = 0.0
+    #     elif objective == "f":
+    #         w1_free = -np.sum(c1 * f_alt[:4])
+    #         w2_free = -0.5 * np.sum(f_alt[4:8])
+    #     else:
+    #         raise ValueError("objective must be 'Nw' or 'f'.")
+
+    #     w1, _ = self._project_scalar_onto_union(w1_free, w1_intervals)
+    #     w2, _ = self._project_scalar_onto_union(w2_free, w2_intervals)
+        
+    #     print("w1_free, w1_proj:", w1_free, w1)
+    #     print("w2_free, w2_proj:", w2_free, w2)
+    #     f = np.empty(8, float)
+    #     f[:4] = f_alt[:4] + c1 * w1
+    #     f[4:] = f_alt[4:] + c2 * w2
+
+    #     eps = 1e-12
+    #     assert np.all( (f <= fdz_min - eps) | (f >= fdz_max + eps) ), \
+    #     "Deadzone violation detected after adaptation"
+
+    #     return dict(status="optimal", w=np.array([w1, w2]), f=f, w1_intervals=w1_intervals, w2_intervals=w2_intervals)
+
+    def thruster_adaption(self, u_MPC, V_batt):
+        u_MPC = np.asarray(u_MPC, dtype=float).reshape(1, -1)
+        f_alt = np.array(self.map_mpc_pwm_to_force(u_MPC, V_batt)).reshape(-1)
+
+        f_min, f_max, f_dz_minus, f_dz_plus = self.get_force_limits(V_batt)
+
+        n_thruster = int(u_MPC.shape[1])
+        f_min = np.full(n_thruster, f_min, dtype=float)
+        f_max = np.full(n_thruster, f_max, dtype=float)
+        f_dz_minus = np.full(n_thruster, f_dz_minus, dtype=float)
+        f_dz_plus = np.full(n_thruster, f_dz_plus, dtype=float)
+
+        best = self.nullspace_adaption_fast(
+            f_alt, f_dz_minus, f_dz_plus, fmin=f_min, fmax=f_max, objective="f"
+        )
+        if best["status"] == "infeasible":
+            # print("No feasible pattern (deadzone + saturation). Solving without saturation")
+            best = self.nullspace_adaption_fast(f_alt, f_dz_minus, f_dz_plus, fmin=None, fmax=None, objective="f")
+            if best["status"] == "infeasible":
+                raise RuntimeError("No feasible pattern even without saturation.")
+        f_new = best.get("f")
+        u_new = np.array([self.command_simple(f, V_batt) for f in f_new])
+        u_new = self.clip_pwm_saturation(u_new)
+        return u_new
+    
+    def save(self, path):
+        arrV = self.voltages
+        def _pack(m): return json.dumps({str(v): m[v].tolist() for v in arrV})
+        np.savez(path,
+                 voltages=arrV, f_eps=self.f_eps, f_dz=self.f_dz, deg=self.deg, L=self.L,
+                 a_fwd=_pack(self.a_fwd), a_rev=_pack(self.a_rev),
+                 u0_vals=np.array([self.u0_map[v] for v in arrV]),
+                 uminus_vals=np.array([self.uminus_map[v] for v in arrV]),
+                 uplus_vals=np.array([self.uplus_map[v] for v in arrV]),
+                 tau_volt=self.tau_volt, hysteresis=self.hysteresis,
+                 u_min=self.u_min if self.u_min is not None else np.array([np.nan]),
+                 u_max=self.u_max if self.u_max is not None else np.array([np.nan]))
+
+    @classmethod
+    def load(cls, path):
+        d = np.load(path, allow_pickle=True)
+        arrV = d['voltages'].astype(float)
+        deg = int(d['deg'])
+        def _unpack(key):
+            return {float(k): np.array(v) for k,v in json.loads(d[key].item()).items()}
+        a_fwd = _unpack('a_fwd'); a_rev = _unpack('a_rev')
+        u0_map = {float(v): float(u) for v,u in zip(arrV, d['u0_vals'].astype(float))}
+        uminus_map = {float(v): float(u) for v,u in zip(arrV, d['uminus_vals'].astype(float))}
+        uplus_map  = {float(v): float(u) for v,u in zip(arrV, d['uplus_vals'].astype(float))}
+        u_min = None if np.isnan(d["u_min"]).any() else float(d["u_min"])
+        u_max = None if np.isnan(d["u_max"]).any() else float(d["u_max"])
+        return cls(voltages=arrV, f_eps=float(d['f_eps']), f_dz=float(d['f_dz']), deg=deg, L = float(d['L']),
+                   a_fwd=a_fwd, a_rev=a_rev,
+                   u0_map=u0_map, uminus_map=uminus_map, uplus_map=uplus_map,
+                   tau_volt=float(d['tau_volt']), hysteresis=float(d['hysteresis']),
+                   u_min=u_min, u_max=u_max)
+    
+def print_polynomial(V, coeffs_val, deg, type, rmse):
+    coeffs = np.asarray(coeffs_val).reshape(-1)
+    coeff_strs = [f"a{k}={coeffs[k]:.3f}" for k in range(len(coeffs))]
+    print(f"V={V}, type={type}, deg={deg}, RMSE={rmse:.4f}, coeffs: " + ", ".join(coeff_strs))
+
+
+def train_from_folder(thruster_params_path, f_eps=0.1, f_dz=0.3, deg=2, lam=1e-6, monotone=True,
+                      tau_volt=0.02, hysteresis=1.2, u_min=1100, u_max=1900, min_pts=8):
+    data = utils_math.load_all_thruster_data(thruster_params_path)
+    voltages = sorted([float(v) for v in data.keys()])
+
+    # compute global force extrema over all voltages
+    all_forces = []
+    for V in voltages:
+        dV = data[V]
+        all_forces.extend(dV.get('force', []))
+    all_forces = np.asarray(all_forces).astype(float) if len(all_forces) > 0 else np.array([])
+
+    if all_forces.size:
+        f_max_all = float(np.max(all_forces))
+        f_min_all = float(np.min(all_forces))
+    else:
+        f_max_all = f_min_all = 0.0
+
+    u0_map, uminus_map, uplus_map = {}, {}, {}
+    a_fwd, a_rev = {}, {}
+    rmse_fwd, rmse_rev = {}, {}
+
+    for V in voltages:
+        pwm = np.asarray(data[V]['pwm']).astype(float)
+        f   = np.asarray(data[V]['force']).astype(float)
+
+        u0, u_minus, u_plus = _deadband_from_voltage_series(f, pwm, f_eps)
+        u0_map[V] = u0; uminus_map[V] = u_minus; uplus_map[V] = u_plus
+
+        mask_fwd = f > f_eps
+        if np.sum(mask_fwd) >= min_pts:
+            a_fwd[V], rmse_fwd[V] = _fit_forward_poly(
+                u=pwm[mask_fwd], f=f[mask_fwd], deg=deg,
+                u_anchor=u_plus, f_anchor=f_dz, lam=lam, monotone=monotone,
+                u_bounds=(u_plus, float(np.max(pwm)))
+            )
+            print_polynomial(V, a_fwd[V], deg, "forward", rmse_fwd[V])
+
+        else:
+            slope = (np.max(f)-f_dz) / max((np.max(pwm)-u_plus), 1e-6)
+            a_fwd[V] = np.array([f_dz - slope*u_plus, slope] + [0.0]*(deg-1))
+
+        mask_rev = f < -f_eps
+        if np.sum(mask_rev) >= min_pts:
+            a_rev[V], rmse_rev[V] = _fit_forward_poly(
+                u=pwm[mask_rev], f=f[mask_rev], deg=deg,
+                u_anchor=u_minus, f_anchor=-f_dz, lam=lam, monotone=monotone,
+                u_bounds=(float(np.min(pwm)), u_minus)
+            )
+            print_polynomial(V, a_rev[V], deg, "reverse", rmse_rev[V])
+        else:
+            slope = (-f_dz - np.min(f)) / max((u_minus - np.min(pwm)), 1e-6)
+            a_rev[V] = np.array([-f_dz - slope*u_minus, slope] + [0.0]*(deg-1))
+
+    lm = find_linear_model(thruster_params_path=thruster_params_path, voltages=None, u_min=u_min)
+    L = lm['L']
+
+    return ThrusterInversePoly(voltages=voltages, f_eps=f_eps, f_dz=f_dz, deg=deg, L=L,
+                               a_fwd=a_fwd, a_rev=a_rev,
+                               u0_map=u0_map, uminus_map=uminus_map, uplus_map=uplus_map,
+                               tau_volt=tau_volt, hysteresis=hysteresis,
+                               u_min=u_min, u_max=u_max, f_max_all=f_max_all, f_min_all=f_min_all,
+                               rmse_fwd=rmse_fwd, rmse_rev=rmse_rev)
+
+def clip_data(u, f, model):
+    _lo = -np.inf
+    _hi = np.inf
+    if model.u_min is not None:
+        _lo = model.u_min
+    if model.u_max is not None:
+        _hi = model.u_max
+
+    mask = np.isfinite(u)
+    if np.isfinite(_lo):
+        mask &= (u >= _lo)
+    if np.isfinite(_hi):
+        mask &= (u <= _hi)
+    return u[mask], f[mask]
+
+def plot_forward_fits(thruster_params_path, model, save_path=None, show=True, volts=None, max_points_per_voltage=None, voltages_to_plot=None):
+    if voltages_to_plot is not None:
+        if isinstance(voltages_to_plot, str):
+            # allow comma- or space-separated string
+            toks = [t for t in voltages_to_plot.replace(',', ' ').split() if t]
+            voltages_to_plot = [float(t) for t in toks]
+        else:
+            voltages_to_plot = [float(v) for v in voltages_to_plot]
+    
+    data = utils_math.load_all_thruster_data(thruster_params_path)
+    plt.figure()
+
+    for V in voltages_to_plot:
+        if V in data:
+            dV = data[V]
+            u_raw = np.asarray(dV['pwm']).astype(float)
+            f_raw = np.asarray(dV['force']).astype(float)
+            if max_points_per_voltage and len(u_raw)>max_points_per_voltage:
+                idx = np.linspace(0, len(u_raw)-1, max_points_per_voltage).astype(int)
+                u_raw, f_raw = u_raw[idx], f_raw[idx]
+            plt.scatter(u_raw, f_raw, s=6, alpha=0.35, label=f"raw V={V:g}")
+
+        u_plus_interp = model._interp_scalar(V, model.uplus_map)
+        u_minus_interp = model._interp_scalar(V, model.uminus_map)
+        u_line = np.linspace(u_plus_interp, model.u_max, 200)
+        a = model._blend_forward_coeffs(V, side="fwd")
+        f_fit = _poly_eval_forward(a, u_line)
+        plt.plot(u_line, f_fit, linewidth=1.6, label=f"fit fwd V={V:g}")
+
+        u_line_r = np.linspace(model.u_min, u_minus_interp, 200)
+        ar = model._blend_forward_coeffs(V, side="rev")
+        f_fit_r = _poly_eval_forward(ar, u_line_r)
+        plt.plot(u_line_r, f_fit_r, linewidth=1.6, label=f"fit rev V={V:g}")
+
+        u_minus = u_minus_interp; u_plus = u_plus_interp
+        ax = plt.gca()
+        ax.fill_betweenx([-model.f_dz, model.f_dz], [u_minus,u_minus], [u_plus,u_plus], color='grey', alpha=0.25)
+
+    plt.xlabel("PWM [µs]")
+    plt.ylabel("Thrust f [N]")
+    plt.title("Forward fits f(u) per voltage (with raw data)")
+    plt.grid(True)
+    plt.legend(fontsize='small', ncol=2)
+    if save_path:
+        plt.tight_layout(); plt.savefig(save_path, dpi=150)
+    if show:
+        plt.tight_layout()
+
+def plot_inverse_fits(thruster_params_path, model, save_path=None, show=True,
+                        max_points_per_voltage=None, voltages_to_plot=None, f_samples=200):
+    """
+    Plot PWM (u) over thrust (f) by inverting the fitted forward polynomials
+    using _invert_forward_coeffs. Similar behavior/options as plot_forward_fits,
+    but x-axis is thrust and y-axis is PWM.
+    """
+    # normalize voltages_to_plot input (allow string, list, single number, or None)
+    if voltages_to_plot is not None:
+        if isinstance(voltages_to_plot, str):
+            toks = [t for t in voltages_to_plot.replace(',', ' ').split() if t]
+            voltages_to_plot = [float(t) for t in toks]
+        elif isinstance(voltages_to_plot, (list, tuple)):
+            voltages_to_plot = [float(v) for v in voltages_to_plot]
+        else:
+            voltages_to_plot = [float(voltages_to_plot)]
+
+    data = utils_math.load_all_thruster_data(thruster_params_path)
+    plt.figure()
+
+    for V in voltages_to_plot:
+        if V in data:
+            dV = data[V]
+            u_raw = np.asarray(dV['pwm']).astype(float)
+            f_raw = np.asarray(dV['force']).astype(float)
+            if max_points_per_voltage and len(u_raw)>max_points_per_voltage:
+                idx = np.linspace(0, len(u_raw)-1, max_points_per_voltage).astype(int)
+                u_raw, f_raw = u_raw[idx], f_raw[idx]
+            plt.scatter(f_raw, u_raw, s=6, alpha=0.35, label=f"raw V={V:g}")
+
+
+
+        # prepare forward (positive thrust) inversion
+        a_fwd = model._blend_forward_coeffs(V, side="fwd")
+        u_edge_fwd = model._interp_scalar(V, model.uplus_map)
+        f_start = model.f_dz
+        f_end = model.f_max_all
+        f_vals_fwd = np.linspace(f_start, f_end, f_samples)
+        u_vals_fwd = [ _invert_forward_coeffs(a_fwd, float(fv), side="fwd",
+                                                u_edge=u_edge_fwd, u_min=model.u_min, u_max=model.u_max)
+                        for fv in f_vals_fwd ]
+        u_vals_fwd, f_vals_fwd = clip_data(np.array(u_vals_fwd), np.array(f_vals_fwd), model)
+        plt.plot(f_vals_fwd, u_vals_fwd, linewidth=1.6, label=f"fit inv fwd V={V:g}")
+
+        # prepare reverse (negative thrust) inversion
+        a_rev = model._blend_forward_coeffs(V, side="rev")
+        u_edge_rev = model._interp_scalar(V, model.uminus_map)
+        f_start_r = model.f_min_all
+        f_end_r = -model.f_dz
+        f_vals_rev = np.linspace(f_start_r, f_end_r, f_samples)
+        u_vals_rev = [ _invert_forward_coeffs(a_rev, float(fv), side="rev",
+                                                u_edge=u_edge_rev, u_min=model.u_min, u_max=model.u_max)
+                        for fv in f_vals_rev ]
+
+        u_vals_rev, f_vals_rev = clip_data(np.array(u_vals_rev), np.array(f_vals_rev), model)
+        plt.plot(f_vals_rev, u_vals_rev, linewidth=1.6, label=f"fit inv rev V={V:g}")
+
+        # a = [(f,u) for f,u in zip(f_vals_rev, u_vals_rev)]
+        # print(a)
+
+        # draw deadband region as vertical band in f (thrust) coordinates
+        ax = plt.gca()
+        ax.fill_betweenx([u_edge_rev if u_edge_rev is not None else 0,
+                            u_edge_fwd if u_edge_fwd is not None else 1],
+                            [-model.f_dz, -model.f_dz], [model.f_dz, model.f_dz],
+                            color='grey', alpha=0.25)
+
+    plt.xlabel("Thrust f [N]")
+    plt.ylabel("PWM [µs]")
+    plt.title("Inverse fits u(f) per voltage (with raw data)")
+    plt.grid(True)
+    plt.legend(fontsize='small', ncol=2)
+    if save_path:
+        plt.tight_layout(); plt.savefig(save_path, dpi=150)
+    if show:
+        plt.tight_layout()
+
+def plot_forward_and_inverse_fits(thruster_params_path, model, save_path=None, show=True, volts=None, max_points_per_voltage=None, voltages_to_plot=None):
+    if voltages_to_plot is not None:
+        if isinstance(voltages_to_plot, str):
+            # allow comma- or space-separated string
+            toks = [t for t in voltages_to_plot.replace(',', ' ').split() if t]
+            voltages_to_plot = [float(t) for t in toks]
+        else:
+            voltages_to_plot = [float(v) for v in voltages_to_plot]
+    
+    data = utils_math.load_all_thruster_data(thruster_params_path)
+    plt.figure()
+
+    for V in voltages_to_plot:
+        u_plus_interp = model._interp_scalar(V, model.uplus_map)
+        u_minus_interp = model._interp_scalar(V, model.uminus_map)
+        u_line = np.linspace(u_plus_interp, model.u_max, 200)
+        a = model._blend_forward_coeffs(V, side="fwd")
+        f_fit = _poly_eval_forward(a, u_line)
+        plt.plot(u_line, f_fit, linewidth=1.6, label=f"fit fwd V={V:g}")
+
+        u_line_r = np.linspace(model.u_min, u_minus_interp, 200)
+        ar = model._blend_forward_coeffs(V, side="rev")
+        f_fit_r = _poly_eval_forward(ar, u_line_r)
+        plt.plot(u_line_r, f_fit_r, linewidth=1.6, label=f"fit rev V={V:g}")
+
+        u_minus = u_minus_interp; u_plus = u_plus_interp
+        ax = plt.gca()
+        ax.fill_betweenx([-model.f_dz, model.f_dz], [u_minus,u_minus], [u_plus,u_plus], color='grey', alpha=0.25)
+
+        # prepare forward (positive thrust) inversion
+        a_fwd = model._blend_forward_coeffs(V, side="fwd")
+        u_edge_fwd = model._interp_scalar(V, model.uplus_map)
+        f_start = model.f_dz
+        f_end = model.f_max_all
+        f_vals_fwd = np.linspace(f_start, f_end, 200)
+        u_vals_fwd = [ _invert_forward_coeffs(a_fwd, float(fv), side="fwd",
+                            u_edge=u_edge_fwd, u_min=model.u_min, u_max=model.u_max)
+                for fv in f_vals_fwd ]
+        u_vals_fwd, f_vals_fwd = clip_data(np.array(u_vals_fwd), np.array(f_vals_fwd), model)
+        plt.plot(u_vals_fwd, f_vals_fwd, linewidth=1.6, linestyle='--', label=f"fit inv fwd V={V:g}")
+
+        # prepare reverse (negative thrust) inversion
+        a_rev = model._blend_forward_coeffs(V, side="rev")
+        u_edge_rev = model._interp_scalar(V, model.uminus_map)
+        f_start_r = model.f_min_all
+        f_end_r = -model.f_dz
+        f_vals_rev = np.linspace(f_start_r, f_end_r, 200)
+        u_vals_rev = [ _invert_forward_coeffs(a_rev, float(fv), side="rev",
+                            u_edge=u_edge_rev, u_min=model.u_min, u_max=model.u_max)
+                for fv in f_vals_rev ]
+
+        u_vals_rev, f_vals_rev = clip_data(np.array(u_vals_rev), np.array(f_vals_rev), model)
+        plt.plot(u_vals_rev, f_vals_rev, linewidth=1.6, linestyle='--', label=f"fit inv rev V={V:g}")
+
+
+    plt.xlabel("PWM [µs]")
+    plt.ylabel("Thrust f [N]")
+    plt.title("Forward and inverse fits")
+    plt.grid(True)
+    plt.legend(fontsize='small', ncol=2)
+    if save_path:
+        plt.tight_layout(); plt.savefig(save_path, dpi=150)
+    if show:
+        plt.tight_layout()
+
+# extend CLI to allow --plot and optional --plot-voltages
+def _cli_plot(args, model, thruster_params_path):
+    if not getattr(args, "plot", False):
+        return
+    
+    voltages = None
+    if not getattr(args, "plot_voltages", None):
+        voltages = [float(v) for v in model.voltages]
+    else:
+        # parse optional voltage list from several possible arg names
+        volt_arg = None
+        for attr in ("plot_voltages", "plot-voltages", "plot_vs", "plot_v"):
+            if hasattr(args, attr) and getattr(args, attr) is not None:
+                volt_arg = getattr(args, attr)
+                break
+
+        # helper parse: allow list, comma/space-separated string
+        def _parse_voltage_list(s):
+            if s is None:
+                return None
+            if isinstance(s, (list, tuple)):
+                return [float(x) for x in s]
+            if isinstance(s, str):
+                toks = [t for t in s.replace(',', ' ').split() if t]
+                return [float(t) for t in toks]
+            # single numeric
+            try:
+                return [float(s)]
+            except Exception:
+                return None
+        voltages = _parse_voltage_list(volt_arg)
+    print(f"Plotting fits for voltages: {voltages}")
+    save = args.plot if isinstance(args.plot, str) else None
+    plot_forward_fits(thruster_params_path, model, save_path=save, show=(save is None), voltages_to_plot=voltages)
+    plot_inverse_fits(thruster_params_path, model, save_path=save, show=(save is None), voltages_to_plot=voltages)
+    plot_forward_and_inverse_fits(thruster_params_path, model, save_path=save, show=(save is None), voltages_to_plot=voltages)
+    if (save is None):
+        plt.show()
+
+def find_linear_model(thruster_params_path=None, voltages=None, u_min=1100):
+    """
+    Compute linear slope K per voltage so that thrust = K * pwm passes through (0,0)
+    and through the measured thrust at pwm = u_min. Returns dict with Ks and best-fit L.
+
+    If thruster_params_path is None, uses bluerov package default data folder.
+    voltages: iterable of voltages to process (defaults to [12,14,16,18]).
+    """
+    if voltages is None:
+        voltages = [12.0, 14.0, 16.0]
+    voltages = [float(v) for v in voltages]
+
+    if thruster_params_path is None:
+        bluerov_package_path = get_package_path('bluerov')
+        thruster_params_path = bluerov_package_path + "/thruster_data/"
+
+    data = utils_math.load_all_thruster_data(thruster_params_path)
+
+    Ks = {}
+    used_closest = {}
+    for V in voltages:
+        if V not in data:
+            print(f"V={V}: no data, skipping")
+            continue
+        pwm = np.asarray(data[V].get('pwm', [])).astype(float)
+        f = np.asarray(data[V].get('force', [])).astype(float)
+        if pwm.size == 0 or f.size == 0:
+            print(f"V={V}: empty data arrays, skipping")
+            continue
+
+        # find samples exactly at u_min, else pick closest sample
+        idx = np.where(np.isclose(pwm, float(u_min)))[0]
+        if idx.size == 0:
+            idx = np.array([int(np.argmin(np.abs(pwm - float(u_min))))])
+            used_closest[V] = True
+        else:
+            used_closest[V] = False
+
+        f_at_u_min = float(np.min(f[idx]))  # user requested the minimum thrust at that pwm
+        K = -f_at_u_min # assuming normalized pwm [-1,1]
+        Ks[V] = K
+        print(f"V={V:g}: f_at_u_min={f_at_u_min:.6g}, K={K:.6g} (used_closest={used_closest[V]})")
+
+    if len(Ks) == 0:
+        raise RuntimeError("No valid voltages/data found to compute K.")
+
+    Vs = np.array(list(Ks.keys()), dtype=float)
+    Ks_arr = np.array([Ks[v] for v in Vs], dtype=float)
+
+    # Fit L in model K ≈ L * V  -> minimize sum((K - L*V)^2)
+    # closed form: L = sum(V_i * K_i) / sum(V_i^2)
+    numer = np.sum(Vs * Ks_arr)
+    denom = np.sum(Vs**2)
+    L = float(numer / denom)
+
+    K_pred = L * Vs
+    resid = Ks_arr - K_pred
+    rmse = float(np.sqrt(np.mean(resid**2)))
+
+    print("")
+    print("Summary:")
+    for i, v in enumerate(Vs):
+        print(f" V={v:g}: K_obs={Ks_arr[i]:.6g}, K_pred={K_pred[i]:.6g}, err={resid[i]:.6g}")
+    print(f"\nBest-fit L = {L:.6g}  (RMSE on K = {rmse:.6g})")
+
+    def _norm_pwm_piecewise(pwm_array, u_min=1100, u_mid=1500, u_max=1900):
+        pwm_array = np.asarray(pwm_array, dtype=float)
+        norm = np.empty_like(pwm_array, dtype=float)
+
+        # below neutral -> map [u_min, u_mid] -> [-1, 0]
+        mask_lo = pwm_array <= u_mid
+        norm[mask_lo] = (pwm_array[mask_lo] - u_mid) / (u_min - u_mid)  # denominator negative
+        # above neutral -> map [u_mid, u_max] -> [0, 1]
+        mask_hi = ~mask_lo
+        norm[mask_hi] = (pwm_array[mask_hi] - u_mid) / (u_max - u_mid)
+        # clip for any outliers
+        return np.clip(norm, -1.0, 1.0)
+
+    def plot_raw_and_linear(L=None, thruster_params_path=None, voltages=None, u_min=1100, u_max=1900, show_per_voltage=False):
+        """
+        Plots:
+        1) Raw thrust-vs-PWM scatter for each requested voltage
+        2) Linear characteristics using thrust = (L * V) * PWM_norm
+
+        - Uses your find_linear_model() to get L.
+        - Normalizes PWM piecewise around neutral (1500 µs) so both sides hit ±1.
+        """
+        if voltages is None:
+            voltages = [12.0, 14.0, 16.0]  # extend to 18 if you have data
+
+        # Load the same data dict used by your function
+        if thruster_params_path is None:
+            bluerov_package_path = get_package_path('bluerov')
+            thruster_params_path = bluerov_package_path + "/thruster_data/"
+        data = utils_math.load_all_thruster_data(thruster_params_path)
+
+        # Combined plot
+        plt.figure()
+        for V in voltages:
+            if V not in data:
+                print(f"V={V}: no data, skipping")
+                continue
+            pwm = np.asarray(data[V].get('pwm', [])).astype(float)
+            f = np.asarray(data[V].get('force', [])).astype(float)
+            if pwm.size == 0 or f.size == 0:
+                print(f"V={V}: empty data arrays, skipping")
+                continue
+
+            # Raw scatter
+            plt.scatter(pwm, f, s=6, alpha=0.35, label=f"{V:g} V raw")
+
+            # Linear model curve: thrust = (L*V)*pwm_norm
+            pwm_sorted = np.linspace(max(min(pwm.min(), u_min), 800), min(max(pwm.max(), u_max), 2200), 200)
+            pwm_norm = np.linspace(-1, 1, 200)
+            f_lin = (L * float(V)) * pwm_norm
+            plt.plot(pwm_sorted, f_lin, linewidth=2, label=f"{V:g} V linear")
+
+        plt.title("Thruster force vs PWM (raw) with linear model overlay for MPC")
+        plt.xlabel("PWM [µs]")
+        plt.ylabel("Force [N]")
+        plt.grid(True, which="both", linestyle="--", alpha=0.4)
+        plt.legend()
+        plt.tight_layout()
+
+        if show_per_voltage:
+            # Optional: per-voltage panels
+            for V in voltages:
+                if V not in data:
+                    continue
+                pwm = np.asarray(data[V].get('pwm', [])).astype(float)
+                f = np.asarray(data[V].get('force', [])).astype(float)
+                if pwm.size == 0 or f.size == 0:
+                    continue
+                plt.figure()
+                plt.scatter(pwm, f, s=14, label=f"{V:g} V raw")
+                pwm_sorted = np.linspace(max(min(pwm.min(), u_min), 800), min(max(pwm.max(), u_max), 2200), 200)
+                pwm_norm = _norm_pwm_piecewise(pwm_sorted, u_min=u_min, u_mid=1500, u_max=u_max)
+                f_lin = (L * float(V)) * pwm_norm
+                plt.plot(pwm_sorted, f_lin, linewidth=2, label=f"{V:g} V linear")
+                plt.title(f"Thruster force vs PWM at {V:g} V")
+                plt.xlabel("PWM [µs]")
+                plt.ylabel("Force [N]")
+                plt.grid(True, which="both", linestyle="--", alpha=0.4)
+                plt.legend()
+                plt.tight_layout()
+        plt.show()
+
+    plot_raw_and_linear(L=L,thruster_params_path=thruster_params_path, voltages=voltages, u_min=u_min, show_per_voltage=False)
+
+    return {"Ks": Ks, "L": L, "Vs": Vs, "K_pred": dict(zip(Vs.tolist(), K_pred.tolist())), "rmse_K": rmse}
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_root", default=None, help="Folder for CSVs (utils_math loader).")
+    ap.add_argument("--f_eps", type=float, default=0.1, help="Deadband threshold [N]")
+    ap.add_argument("--f_dz", type=float, default=0.3, help="Deadzone force width for fitting [N]")
+    ap.add_argument("--deg", type=int, default=2, choices=[1,2,3,4], help="Polynomial degree for f(u)")
+    ap.add_argument("--lam", type=float, default=1e-6, help="Ridge regularization")
+    ap.add_argument("--no_monotone", action="store_true", help="Disable monotone df/du >= 0 constraint")
+    ap.add_argument("--tau", type=float, default=0.02, help="Voltage LPF time constant [s]")
+    ap.add_argument("--hyst", type=float, default=1.2, help="Deadband hysteresis factor")
+    ap.add_argument("--u_min", type=float, default=1100, help="Lower PWM bound")
+    ap.add_argument("--u_max", type=float, default=1900, help="Upper PWM bound")
+    ap.add_argument("--save", type=str, default="bluerov/thruster_models/thruster_inversepoly_deg3.npz", help="Output model file")
+    ap.add_argument("--plot", nargs='?', const=True, default=False, help="Plot forward fits; optional filename.")
+    ap.add_argument("--plot_voltages", nargs='*', default=None, help="Limit plot to specific voltages")
+    ap.add_argument("--plot-voltages", nargs='?', default=None, help="Optional list of voltages to plot (comma- or space-separated, or multiple args).")
+    args = ap.parse_args()
+
+    if args.data_root is None:
+        bluerov_package_path = get_package_path('bluerov')
+        thruster_params_path = bluerov_package_path + "/thruster_data/"
+    else:
+        thruster_params_path = args.data_root
+
+    model = train_from_folder(thruster_params_path, f_eps=args.f_eps, f_dz=args.f_dz, deg=args.deg, lam=args.lam,
+                              monotone=(not args.no_monotone), tau_volt=args.tau, hysteresis=args.hyst,
+                              u_min=args.u_min, u_max=args.u_max)
+    
+    print("")
+    print(f"RMS Error total [mus]: forward = {model.rmse_fwd:.4f}, reverse = {model.rmse_rev:.4f}, \n")
+
+    print("Example:", "u( f=0.5N, V=15.0V, dt=0.02 ) =", model.command(0.5, 15.0, 0.02))
+    print("Example:", "u( f=0.5N, V=15.0V, dt=0.02 ) =", model.command_simple(0.5, 15.0))
+    # model.save(args.save)
+    # print(f"Saved model to {args.save}")
+
+    _cli_plot(args, model, thruster_params_path)
+
+if __name__ == "__main__":
+    main()

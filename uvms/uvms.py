@@ -6,8 +6,10 @@ import numpy as np
 import casadi as ca
 
 from bluerov import dynamics_symbolic as sym_brv
+from bluerov.thruster_b2_inversepoly import ThrusterInversePoly
 from uvms import model as uvms_model
 from uvms import Lumelsky
+from uvms.uvms_model import UVMSPlantSim
 
 from manipulator import (
     kinematics as manip_kin,
@@ -80,6 +82,8 @@ ATT0_QUAT = utils_math.euler_to_quat(ATT0_EULER[0], ATT0_EULER[1], ATT0_EULER[2]
 VEL0 = np.array([0.0, 0.0, 0.0])
 OMEGA0 = np.array([0.0, 0.0, 0.0])
 UVMS_MODEL_INSTANCE: Optional[uvms_model.UVMSModel] = None
+UVMS_SIM_INSTANCE: Optional[UVMSPlantSim] = None
+THRUSTER_MODEL: Optional[ThrusterInversePoly] = None
 
 MANIP_PARAMS: Optional[dict] = None
 ALPHA_PARAMS: Optional[dict] = None
@@ -89,10 +93,10 @@ def _constraint_tank() -> ca.Function:
     vehicle_bound = ca.MX.sym('vehicle_bound', 7)
     underarm_bound = ca.MX.sym('underarm_bound', 7) # swept-sphere
 
-    beta_smoothmin = ca.DM(10.0)
-    safety_margin = ca.DM(0.05)
-    beta_margin = ca.DM(0.2) # must be greater than safety_margin
-    eta_weight = ca.DM(4.0)
+    beta_smoothmin = ca.DM(10.0) # 10.0
+    safety_margin = ca.DM(0.05) # [m] 0.05
+    beta_margin = ca.DM(0.2) # [m] 0.2 must be greater than safety_margin
+    eta_weight = ca.DM(20.0) # vorher nur 4.0, mit 50.0 geht es, wenn ich mit eef voraus gegen wand fahre
 
     p1_vehicle = vehicle_bound[0:3]
     p2_vehicle = vehicle_bound[3:6]
@@ -166,7 +170,7 @@ def _constraint_collision(collision_test: ca.Function) -> ca.Function:
     p_vehicle_pill_offset = ca.DM([0.0, 0.1375, 0.0]) # offset to pill end points left and right (L=0.275m/2)
     safety_margin = ca.DM(0.02) # meters # alpha_L
     beta_margin = ca.DM(0.05) # must be greater than safety_margin
-    eta_weight = ca.DM(10.0)
+    eta_weight = ca.DM(10.0) # vorher 10.0
     p_unit = ca.DM([1.0, 0.0, 0.0])
 
     # p_underarm1 = p_eef + utils_sym.quaternion_rotation(att_eef, p_eef_offset)
@@ -434,10 +438,10 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
     opti.subject_to(X[:, 0] == x0p)
 
     # --- weights (tune as you like) ---
-    Qpos = ca.DM.eye(3) * 100.0
+    Qpos = ca.DM.eye(3) * 10.0 #100
     Qvel = ca.DM.eye(N_DOF) * 1.0
     R    = ca.DM.eye(CTRL_DIM) * 1e-4
-    Rdu  = ca.DM.eye(CTRL_DIM) * 1e-3
+    Rdu  = ca.DM.eye(CTRL_DIM) * 7.0 # 1e-3
 
     # --- rollout over horizon ---
     u_prev = Uprev0
@@ -477,9 +481,10 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         cost += uk.T     @ R    @ uk
         cost += (uk - u_prev).T @ Rdu @ (uk - u_prev)
 
+        inflate = 0.01 * 2.0 # 1% margin on PWM limits
         if USE_PWM:
-            opti.subject_to(U[N_JOINTS:, k] <=  1.0)
-            opti.subject_to(U[N_JOINTS:, k] >= -1.0)
+            opti.subject_to(U[N_JOINTS:, k] <=  1.0 - inflate)
+            opti.subject_to(U[N_JOINTS:, k] >= -1.0 + inflate)
 
         # Joint position limits constraints
         opti.subject_to(U[0:N_JOINTS, k] <= JOINT_VELOCITIES[:N_JOINTS])
@@ -502,6 +507,7 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         opti.subject_to(g_underarm >= 0)
         cost += cost_vehicle + cost_underarm
 
+        #TODO. weight vehicle effort stronger than arm effort, as easier to use arm (but shouldnt the optimizer check that automatically anyways?)
         #TODO: manipulability cost that drives arm away from singularities
 
         u_prev = uk
@@ -669,10 +675,17 @@ def run_mpc(
         #####
         xk = X_real[:, step]
         uk = U_appl[:, step]
-        u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1]
-        ddq_k = (uk[0:N_JOINTS] - u_prev0_val[0:N_JOINTS]) / dt
-        xkp1, _, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu0, f_eef_val, l_eef_val)
-        X_real[:, step+1] = xkp1.full().flatten()
+        uk = uk + 0.1 * np.random.randn(CTRL_DIM)  # add small noise to simulate real application
+        # u_prev0_val=u_prev0 if step == 0 else U_appl[:, step-1]
+        # ddq_k = (uk[0:N_JOINTS] - u_prev0_val[0:N_JOINTS]) / dt
+        # xkp1, _, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu0, f_eef_val, l_eef_val)
+        # X_real[:, step+1] = xkp1.full().flatten()
+        # --- thrust adaption ---
+        u_adapted = THRUSTER_MODEL.mpc_thruster_command_adaption(uk[N_JOINTS:], V_BAT)
+        u_thrust = THRUSTER_MODEL.pwm_to_force(u_adapted, V_BAT)
+        u_full = np.concatenate([uk[:N_JOINTS], u_thrust])
+        # --- call simulation model with adapted thruster forces ---
+        X_real[:, step+1], _ = UVMS_SIM_INSTANCE.step(dt, xk, u_full)
         #################################
 
 
@@ -717,6 +730,7 @@ def check_fixed_point(q, nu, eta, uq, uv, ddq_in, dnu_g, quat, f_eef, l_eef):
 
 def init_uvms_model(
     bluerov_params_path: str = 'model_params.yaml',
+    bluerov_params_disturbed_path: str = 'model_params_disturbed.yaml',
     dh_params_path: str = 'alpha_kin_params.yaml',
     joint_limits_path: Optional[str] = None,
     manipulator_dyn_params_paths: Optional[list[str]] = None,
@@ -730,7 +744,7 @@ def init_uvms_model(
 ) -> None:
     global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED, LUMELSKY, LUMELSKY_CASES, COLLISION, CONSTRAINT_COLLISION, CONSTRAINT_TANK
     global USE_QUATERNION, USE_PWM, USE_FIXED_POINT, FIXED_POINT_ITER, N_HORIZON, V_BAT, L, MIXER, M_INV, JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, INTEGRATOR, N_DOF, N_JOINTS, STATE_DIM, CTRL_DIM, C_FUN, D_FUN, G_FUN, J_FUN
-    global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, MANIP_KIN_REAL
+    global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, UVMS_SIM_INSTANCE, THRUSTER_MODEL, MANIP_KIN_REAL
     global MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS
 
     with _LOCK:
@@ -746,6 +760,7 @@ def init_uvms_model(
         N_HORIZON = n_horizon
 
         BRV_PARAMS = utils_math.load_model_params(bluerov_params_path)
+        BRV_PARAMS_DISTURBED = utils_math.load_model_params(bluerov_params_disturbed_path)
         BLUEROV_DYN = sym_brv.BlueROVDynamicsSymbolic(BRV_PARAMS)
 
         MANIP_PARAMS = utils_math.load_dh_params(dh_params_path)
@@ -787,7 +802,22 @@ def init_uvms_model(
 
         INITIALIZED = True
 
-        UVMS_MODEL_INSTANCE = uvms_model.UVMSModel(MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS, Q0, POS0, ATT0_EULER, VEL0, OMEGA0)
+        UVMS_SIM_INSTANCE = UVMSPlantSim(
+            use_quaternion=True,
+            use_pwm=True,
+            integrator="euler",
+            use_fixed_point=False,
+            v_bat=16.0,
+            brv_params_path=bluerov_params_path,
+            dh_params_path=dh_params_path,
+            manip_dyn_params_paths=manipulator_dyn_params_paths,
+        )
+        UVMS_SIM_INSTANCE.build()
+
+        UVMS_MODEL_INSTANCE = uvms_model.UVMSModel(MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS_DISTURBED, Q0, POS0, ATT0_EULER, VEL0, OMEGA0)
+
+        THRUSTER_MODEL = ThrusterInversePoly.load(get_package_path("bluerov") + "/thruster_models/thruster_inversepoly_deg2.npz")
+
 
 def is_initialized() -> bool:
     return INITIALIZED
@@ -806,6 +836,7 @@ def teardown_for_tests() -> None:
 def main():
     bluerov_package_path = get_package_path('bluerov')
     bluerov_params_path = bluerov_package_path + "/config/model_params.yaml"
+    bluerov_params_disturbed_path = bluerov_package_path + "/config/model_params_disturbed.yaml"
 
     manipulator_package_path = get_package_path('manipulator')
     dh_params_path = manipulator_package_path + "/config/alpha_kin_params.yaml"
@@ -821,6 +852,7 @@ def main():
    
     init_uvms_model(
         bluerov_params_path=bluerov_params_path,
+        bluerov_params_disturbed_path=bluerov_params_disturbed_path,
         dh_params_path=dh_params_path,
         joint_limits_path=joint_limits_path,
         manipulator_dyn_params_paths=manipulator_dyn_params_paths,
@@ -829,7 +861,7 @@ def main():
         use_fixed_point=False,
         v_bat=16.0,
         fixed_point_iter=2,
-        n_horizon=10
+        n_horizon=20 # vorher mit 10 (=0.5s vorausschau bei dt = 0.05) hat es nicht funktioniert
     )
 
     T_duration = 10.0 # [s]
@@ -837,7 +869,7 @@ def main():
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
     # veh_pos_ref_val = np.array([0.8, 0.0, -0.1])  # desired vehicle position for station-keeping
-    veh_pos_ref_val = np.array([3.0, 2.0, -0.7])  # desired vehicle position for station-keeping
+    veh_pos_ref_val = np.array([-3.0, 2.0, -0.7])  # desired vehicle position for station-keeping
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}
