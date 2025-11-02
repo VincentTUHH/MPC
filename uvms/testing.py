@@ -167,7 +167,7 @@ def main():
     V_batt = 15.0
 
     rng = np.random.default_rng(42)
-    u_MPC = rng.uniform(-1.05, 1.05, size=(10000, 8))
+    u_MPC = rng.uniform(-1.0, 1.0, size=(3, 8))
     for _, u in enumerate(u_MPC):
         u_new = model.thruster_adaption(u, V_batt)
     # u_MPC = -1.3 * np.ones((1, 8))  # Test infeasible case
@@ -190,7 +190,8 @@ def main():
     for i, f_alt_vec in enumerate(f_alts, start=1):
         # print(f"\nSample {i}: f_alt = {np.round(f_alt_vec, 1)}")
         t0 = time.time()
-
+        # if i == 13:
+        #     print(f"Case 13")
         best = model.nullspace_adaption_fast(
             f_alt_vec, f_dz_minus, f_dz_plus, fmin=f_min, fmax=f_max, objective="f"
         )
@@ -214,7 +215,11 @@ def main():
         # print(f"f*: {np.round(best.get('f'), 1)}")
         results.append(best)
         f_new = best.get("f")
+        # if i == 13:
+        #     print(f_new)
         u_new = np.array([model.command_simple(f, V_batt) for f in f_new])
+        # if i == 13:
+        #     print(u_new)
         u_new = model.clip_pwm_saturation(u_new)
         results_u.append(u_new)
         if is_infeasible:
@@ -228,8 +233,10 @@ def main():
             tau_error = float(np.sqrt(np.mean((tau_new - tau_old) ** 2)))
             print(f"tau_error: {tau_error:.4f} N")
         is_infeasible = False
+        # if i == 13:
+        #     print(f"Case 13 ende")
 
-    plt.show()
+    # plt.show()
 
     print(f"\nTotal infeasible samples: {count_infeasible} out of {len(f_alts)}")
 
@@ -239,9 +246,13 @@ def main():
     u_dz_minus = np.full(n_thruster, u_dz_minus, dtype=float)
     u_dz_plus = np.full(n_thruster, u_dz_plus, dtype=float)
 
-    # for i, (u_alt_row, u_res_row) in enumerate(zip(u_alts, results_u), start=1):
-    #     plot_lane(u_alt_row, u_res_row, fmin=np.array(u_min), fdz_min=u_dz_minus, fdz_max=u_dz_plus, fmax=u_max, title=f"Sample {i}: Nullspace Adaption Result PWM")
-    # plt.show()
+    for i, (u_alt_row, u_res_row) in enumerate(zip(u_alts, results_u), start=1):
+        plot_lane(u_alt_row, u_res_row, fmin=np.array(u_min), fdz_min=u_dz_minus, fdz_max=u_dz_plus, fmax=u_max, title=f"Sample {i}: Nullspace Adaption Result PWM")
+    plt.show()
 
+    for i, (u_alt, u) in enumerate(zip(u_alts, u_MPC), start=1):
+        u_new = model.mpc_thruster_command_adaption(u, V_batt=16.0)
+        plot_lane(u_alt, u_new, fmin=np.array(u_min), fdz_min=u_dz_minus, fdz_max=u_dz_plus, fmax=u_max, title=f"Sample {i}: Nullspace Adaption Result PWM Direct")
+    plt.show()
 if __name__ == "__main__":
     main()
