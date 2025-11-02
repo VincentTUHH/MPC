@@ -263,8 +263,8 @@ class UVMSPlantSim:
         eta = ca.MX.sym("eta", 7 if self.use_quaternion else 6)
         uv = ca.MX.sym("uv", 8 if self.use_pwm else 6)
         tau_c = ca.MX.sym("tau_c", self.N_DOF)
-
-        tau_v = (self.L * self.v_bat * (self.MIXER @ uv)) if self.use_pwm else uv
+        # uv is the 8 thruster commands [N] here
+        tau_v = (self.MIXER @ uv) if self.use_pwm else uv
         dnu = self.M_INV @ (tau_v + tau_c - self.C_FUN(nu) @ nu - self.D_FUN(nu) @ nu - self.G_FUN(eta))
         return ca.Function("dyn_fossen", [eta, nu, uv, tau_c], [dnu]).expand()
 

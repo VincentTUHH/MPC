@@ -6,6 +6,7 @@ import numpy as np
 import casadi as ca
 
 from bluerov import dynamics_symbolic as sym_brv
+from bluerov.thruster_b2_inversepoly import ThrusterInversePoly
 from uvms import model as uvms_model
 from uvms import Lumelsky
 from uvms.uvms_model import UVMSPlantSim
@@ -82,6 +83,7 @@ VEL0 = np.array([0.0, 0.0, 0.0])
 OMEGA0 = np.array([0.0, 0.0, 0.0])
 UVMS_MODEL_INSTANCE: Optional[uvms_model.UVMSModel] = None
 UVMS_SIM_INSTANCE: Optional[UVMSPlantSim] = None
+THRUSTER_MODEL: Optional[ThrusterInversePoly] = None
 
 MANIP_PARAMS: Optional[dict] = None
 ALPHA_PARAMS: Optional[dict] = None
@@ -505,6 +507,7 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         opti.subject_to(g_underarm >= 0)
         cost += cost_vehicle + cost_underarm
 
+        #TODO. weight vehicle effort stronger than arm effort, as easier to use arm (but shouldnt the optimizer check that automatically anyways?)
         #TODO: manipulability cost that drives arm away from singularities
 
         u_prev = uk
@@ -677,7 +680,12 @@ def run_mpc(
         # ddq_k = (uk[0:N_JOINTS] - u_prev0_val[0:N_JOINTS]) / dt
         # xkp1, _, _, _, _ = STEP(dt, xk, uk, ddq_k, dnu0, f_eef_val, l_eef_val)
         # X_real[:, step+1] = xkp1.full().flatten()
-        X_real[:, step+1], _ = UVMS_SIM_INSTANCE.step(dt, xk, uk)
+        # --- thrust adaption ---
+        u_adapted = THRUSTER_MODEL.mpc_thruster_command_adaption(uk[N_JOINTS:], V_BAT)
+        u_thrust = THRUSTER_MODEL.pwm_to_force(u_adapted, V_BAT)
+        u_full = np.concatenate([uk[:N_JOINTS], u_thrust])
+        # --- call simulation model with adapted thruster forces ---
+        X_real[:, step+1], _ = UVMS_SIM_INSTANCE.step(dt, xk, u_full)
         #################################
 
 
@@ -736,7 +744,7 @@ def init_uvms_model(
 ) -> None:
     global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED, LUMELSKY, LUMELSKY_CASES, COLLISION, CONSTRAINT_COLLISION, CONSTRAINT_TANK
     global USE_QUATERNION, USE_PWM, USE_FIXED_POINT, FIXED_POINT_ITER, N_HORIZON, V_BAT, L, MIXER, M_INV, JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, INTEGRATOR, N_DOF, N_JOINTS, STATE_DIM, CTRL_DIM, C_FUN, D_FUN, G_FUN, J_FUN
-    global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, UVMS_SIM_INSTANCE, MANIP_KIN_REAL
+    global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, UVMS_SIM_INSTANCE, THRUSTER_MODEL, MANIP_KIN_REAL
     global MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS
 
     with _LOCK:
@@ -807,6 +815,9 @@ def init_uvms_model(
         UVMS_SIM_INSTANCE.build()
 
         UVMS_MODEL_INSTANCE = uvms_model.UVMSModel(MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS_DISTURBED, Q0, POS0, ATT0_EULER, VEL0, OMEGA0)
+
+        THRUSTER_MODEL = ThrusterInversePoly.load(get_package_path("bluerov") + "/thruster_models/thruster_inversepoly_deg2.npz")
+
 
 def is_initialized() -> bool:
     return INITIALIZED
