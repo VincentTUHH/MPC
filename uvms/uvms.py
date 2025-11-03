@@ -48,6 +48,7 @@ LUMELSKY_CASES: Optional[ca.Function] = None
 COLLISION: Optional[ca.Function] = None
 CONSTRAINT_COLLISION: Optional[ca.Function] = None
 CONSTRAINT_TANK: Optional[ca.Function] = None
+CONSTRAINT_MANIPULABILITY: Optional[ca.Function] = None
 
 # Constants/config for fast access
 USE_QUATERNION: bool = False
@@ -153,6 +154,57 @@ def _constraint_tank() -> ca.Function:
     cost_underarm = ca.sum(ca.vertcat(*rho_underarm))
 
     return ca.Function('constraint_tank', [vehicle_bound, underarm_bound], [g_vehicle, g_underarm, cost_vehicle, cost_underarm]).expand()
+
+def det3_sarrus(A):
+    """
+    Compute the determinant of a 3x3 matrix using Sarrus' rule.
+    Accepts numpy arrays or CasADi MX/DM matrices.
+    """
+
+    # shape = A.shape
+    # if shape != (3, 3):
+    #     raise ValueError("det3_sarrus expects a 3x3 matrix")
+
+    a11 = A[0, 0]; a12 = A[0, 1]; a13 = A[0, 2]
+    a21 = A[1, 0]; a22 = A[1, 1]; a23 = A[1, 2]
+    a31 = A[2, 0]; a32 = A[2, 1]; a33 = A[2, 2]
+
+    det = (
+        a11 * a22 * a33
+        + a12 * a23 * a31
+        + a13 * a21 * a32
+        - a13 * a22 * a31
+        - a11 * a23 * a32
+        - a12 * a21 * a33
+    )
+    return det
+
+def _constraint_manipulability_jacobian() -> ca.Function:
+    J_pos = ca.MX.sym('J_pos', 3, N_JOINTS)
+
+    M = J_pos @ J_pos.T # manipulability ellipsoid
+    manipulability_index_sq = det3_sarrus(M) # the squared manipulability_index as square root is more expensive to differentiate and has no real benefit to the cost, its still proportional
+    # reciprocal_manipulability = 1.0 / (manipulability_index_sq + 1e-8)
+
+    log_manipulability = -0.5*ca.log(manipulability_index_sq + 1e-8) # log-det is better conditioned for near singular configurations
+    return ca.Function('constraint_manipulability_jacobian', [J_pos], [log_manipulability]).expand()
+
+def _constraint_manipulability() -> ca.Function:
+    q = ca.MX.sym('q', N_JOINTS)
+
+    kin = sym_manip_kin.KinematicsSymbolic(MANIP_PARAMS)
+    kin.update(q)
+
+    J_pos, J_rot = kin.get_full_jacobian() # J_pos is translation jacobian only of manipulator from base joint to eef
+
+    M = J_pos @ J_pos.T # manipulability ellipsoid
+    manipulability_index_sq = det3_sarrus(M) # the squared manipulability_index as square root is more expensive to differentiate and has no real benefit to the cost, its still proportional
+    # We want to maximize manipulability, so we return its negative for minimization
+    reciprocal_manipulability = 1.0 / (manipulability_index_sq + 1e-8)
+
+    log_manipulability = -0.5*ca.log(manipulability_index_sq + 1e-8) # log-det is better conditioned for near singular configurations
+
+    return ca.Function('constraint_manipulability', [q], [log_manipulability]).expand()
 
 def _constraint_collision(collision_test: ca.Function) -> ca.Function:
     p_vehicle = ca.MX.sym('p_vehicle', 3)
@@ -293,7 +345,7 @@ def _build_eef_blocks() -> tuple[ca.Function, ca.Function]:
     J_eef[3:6, 6:]       = R_I_B @ R_B_0 @ J_rot
 
     f_pose = ca.Function('eef_pose',  [eta, q], [p_eef, att_eef]).expand()
-    f_Jeef = ca.Function('J_eef_fun', [eta, q], [J_eef]).expand()
+    f_Jeef = ca.Function('J_eef_fun', [eta, q], [J_eef, J_pos, J_rot]).expand()
     return f_pose, f_Jeef
 
 def _build_f_sys(
@@ -338,10 +390,10 @@ def _build_f_sys(
     xdot = ca.vertcat(dq, dnu, deta)
 
     p_eef, att_eef = eef_pose(eta, q)
-    J_eef          = J_eef_fun(eta, q)
+    J_eef, J_pos, J_rot = J_eef_fun(eta, q)
 
     return ca.Function('f_sys', [x, u, ddq_in, dnu_g, f_eef, l_eef],
-                       [xdot, dnu, J_eef, p_eef, att_eef]).expand()
+                       [xdot, dnu, J_eef, J_pos, J_rot, p_eef, att_eef]).expand()
 
 def _build_step_func(f_sys: ca.Function) -> ca.Function:
     dt     = ca.MX.sym('dt')
@@ -359,27 +411,27 @@ def _build_step_func(f_sys: ca.Function) -> ca.Function:
         return eta_vec
 
     if INTEGRATOR == "euler":
-        k1, dnu1, J1, P1, A1 = f_sys(x, u, ddq_in, dnu_g, f_eef, l_eef)
+        k1, dnu1, J1, J_pos1, J_rot1, P1, A1 = f_sys(x, u, ddq_in, dnu_g, f_eef, l_eef)
         x_next = x + dt * k1
         x_next = ca.vertcat(x_next[0:N_JOINTS + N_DOF], normalize_quat(x_next[N_JOINTS + N_DOF:]))
-        dnu = dnu1; J_eef = J1; p_eef = P1; att_eef = A1
+        dnu = dnu1; J_eef = J1; J_pos = J_pos1; J_rot = J_rot1; p_eef = P1; att_eef = A1
 
     elif INTEGRATOR == "rk4":
-        k1, d1, J1, P1, A1 = f_sys(x, u, ddq_in, dnu_g, f_eef, l_eef)
-        k2, d2, _,  _,  _  = f_sys(x + 0.5*dt*k1, u, ddq_in, dnu_g, f_eef, l_eef)
-        k3, d3, _,  _,  _  = f_sys(x + 0.5*dt*k2, u, ddq_in, dnu_g, f_eef, l_eef)
-        k4, d4, _,  _,  _  = f_sys(x + dt*k3,     u, ddq_in, dnu_g, f_eef, l_eef)
+        k1, d1, J1, J_pos1, J_rot1, P1, A1 = f_sys(x, u, ddq_in, dnu_g, f_eef, l_eef)
+        k2, d2, _, _, _, _, _ = f_sys(x + 0.5*dt*k1, u, ddq_in, dnu_g, f_eef, l_eef)
+        k3, d3, _, _, _, _, _ = f_sys(x + 0.5*dt*k2, u, ddq_in, dnu_g, f_eef, l_eef)
+        k4, d4, _, _, _, _, _ = f_sys(x + dt*k3,     u, ddq_in, dnu_g, f_eef, l_eef)
 
         x_next = x + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
         x_next = ca.vertcat(x_next[0:N_JOINTS + N_DOF], normalize_quat(x_next[N_JOINTS + N_DOF:]))
 
         dnu   = (d1 + 2*d2 + 2*d3 + d4)/6.0
-        J_eef = J1; p_eef = P1; att_eef = A1
+        J_eef = J1; J_pos = J_pos1; J_rot = J_rot1; p_eef = P1; att_eef = A1
     else:
         raise ValueError("INTEGRATOR must be 'euler' or 'rk4'")
 
     return ca.Function('step', [dt, x, u, ddq_in, dnu_g, f_eef, l_eef],
-                       [x_next, dnu, J_eef, p_eef, att_eef]).expand()
+                       [x_next, dnu, J_eef, J_pos, J_rot, p_eef, att_eef]).expand()
 
 def _build_rollout_unrolled(step_fun: ca.Function, N: int) -> ca.Function:
     x0     = ca.MX.sym('x0', STATE_DIM)
@@ -391,7 +443,7 @@ def _build_rollout_unrolled(step_fun: ca.Function, N: int) -> ca.Function:
     l_eef  = ca.MX.sym('l_eef', 3)
 
     X_list   = [x0]
-    DNU_cols = []; J_cols = []; P_cols = []; A_cols = []
+    DNU_cols = []; J_cols = []; J_pos_cols = []; J_rot_cols = []; P_cols = []; A_cols = []
 
     xk     = x0
     u_prev = Uprev0
@@ -400,21 +452,23 @@ def _build_rollout_unrolled(step_fun: ca.Function, N: int) -> ca.Function:
     for k in range(N):
         uk     = U[:, k]
         ddq_k  = (uk[0:N_JOINTS] - u_prev[0:N_JOINTS]) / dt
-        xk1, dnu_k, Jk, Pk, Ak = step_fun(dt, xk, uk, ddq_k, dnu_g, f_eef, l_eef)
+        xk1, dnu_k, Jk, J_pos_k, J_rot_k, Pk, Ak = step_fun(dt, xk, uk, ddq_k, dnu_g, f_eef, l_eef)
 
         X_list.append(xk1)
-        DNU_cols.append(dnu_k); J_cols.append(Jk); P_cols.append(Pk); A_cols.append(Ak)
+        DNU_cols.append(dnu_k); J_cols.append(Jk); J_pos_cols.append(J_pos_k); J_rot_cols.append(J_rot_k); P_cols.append(Pk); A_cols.append(Ak)
         xk = xk1; u_prev = uk; dnu_g = dnu_k
 
     X_all   = ca.hcat(X_list)
     DNU_all = ca.hcat(DNU_cols)
     J_all   = ca.hcat(J_cols)
+    J_pos_all = ca.hcat(J_pos_cols)
+    J_rot_all = ca.hcat(J_rot_cols)
     P_all   = ca.hcat(P_cols)
     A_all   = ca.hcat(A_cols)
 
     return ca.Function('rollout_unrolled',
         [x0, U, Uprev0, dt, dnu0, f_eef, l_eef],
-        [X_all, DNU_all, J_all, P_all, A_all]
+        [X_all, DNU_all, J_all, J_pos_all, J_rot_all, P_all, A_all]
     ).expand()
 
 def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
@@ -455,7 +509,7 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         ddq_k = (uk[0:N_JOINTS] - u_prev[0:N_JOINTS]) / dt
 
         # Keep existing STEP call:
-        xkp1, dnu_k, J_eef, p_eef, att_eef = STEP(dt, xk, uk, ddq_k, dnu_g, f_eef_p, l_eef_p)
+        xkp1, dnu_k, J_eef, J_pos, J_rot, p_eef, att_eef = STEP(dt, xk, uk, ddq_k, dnu_g, f_eef_p, l_eef_p)
         opti.subject_to(X[:, k+1] == xkp1)
 
         # costs: hold position, damp velocities, modest effort & smoothness
@@ -507,8 +561,12 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         opti.subject_to(g_underarm >= 0)
         cost += cost_vehicle + cost_underarm
 
+        # manipulability maximization
+        manipulability_cost = CONSTRAINT_MANIPULABILITY(J_pos)
+        cost += manipulability_cost * 0.1 # weight for manipulability
+
         #TODO. weight vehicle effort stronger than arm effort, as easier to use arm (but shouldnt the optimizer check that automatically anyways?)
-        #TODO: manipulability cost that drives arm away from singularities
+        #TODO: penalize vehicle inclination
 
         u_prev = uk
         dnu_g  = dnu_k
@@ -742,7 +800,7 @@ def init_uvms_model(
     fixed_point_iter: int = 2,
     n_horizon: int = 10
 ) -> None:
-    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED, LUMELSKY, LUMELSKY_CASES, COLLISION, CONSTRAINT_COLLISION, CONSTRAINT_TANK
+    global INITIALIZED, BLUEROV_DYN, MANIP_DYN, MANIP_KIN, TAU_COUPLING, DYN_FOSSEN, J_EEF, EEF_POSE, F_SYS, STEP, ROLLOUT_UNROLLED, LUMELSKY, LUMELSKY_CASES, COLLISION, CONSTRAINT_COLLISION, CONSTRAINT_TANK, CONSTRAINT_MANIPULABILITY
     global USE_QUATERNION, USE_PWM, USE_FIXED_POINT, FIXED_POINT_ITER, N_HORIZON, V_BAT, L, MIXER, M_INV, JOINT_LIMITS, JOINT_EFFORTS, JOINT_VELOCITIES, INTEGRATOR, N_DOF, N_JOINTS, STATE_DIM, CTRL_DIM, C_FUN, D_FUN, G_FUN, J_FUN
     global Q0, POS0, ATT0_EULER, VEL0, OMEGA0, UVMS_MODEL_INSTANCE, UVMS_SIM_INSTANCE, THRUSTER_MODEL, MANIP_KIN_REAL
     global MANIP_PARAMS, ALPHA_PARAMS, BRV_PARAMS
@@ -799,6 +857,8 @@ def init_uvms_model(
         COLLISION = _check_collision(LUMELSKY_CASES)
         CONSTRAINT_COLLISION = _constraint_collision(COLLISION)
         CONSTRAINT_TANK = _constraint_tank()
+        CONSTRAINT_MANIPULABILITY = _constraint_manipulability_jacobian()
+        # CONSTRAINT_MANIPULABILITY = _constraint_manipulability()
 
         INITIALIZED = True
 
