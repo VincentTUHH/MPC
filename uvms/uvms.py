@@ -585,6 +585,9 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
         cost += 200.0 * (att_vehicle[1]**2 + att_vehicle[2]**2) # assume att_vehicle is normalized
         # interestingly it cuts computation time in half
 
+        # push manipulator infront of vehciel = push base joint towards pi/2
+        cost += 100.0 * (ca.pi/2 - xk[0])**2
+
         #TODO. weight vehicle effort stronger than arm effort, as easier to use arm (but shouldnt the optimizer check that automatically anyways?)
 
         u_prev = uk
@@ -948,7 +951,7 @@ def main():
     M = int(T_duration / dt)  # number of MPC steps / control horizon
     x0 = np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_QUAT)) if USE_QUATERNION else np.concatenate((Q0, VEL0, OMEGA0, POS0, ATT0_EULER))
     # veh_pos_ref_val = np.array([0.8, 0.0, -0.1])  # desired vehicle position for station-keeping
-    veh_pos_ref_val = np.array([3.0, 2.0, -0.7])  # desired vehicle position for station-keeping
+    veh_pos_ref_val = np.array([-3.0, 2.0, -0.7])  # desired vehicle position for station-keeping
     ref_eef_pos = np.zeros((3, M))
     ref_eef_att = np.zeros((4, M))
     # opts = {'ipopt.print_level': 0, 'print_time': 0}
