@@ -551,9 +551,15 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
 
         # Joint position limits constraints
         opti.subject_to(X[:N_JOINTS, k] <= JOINT_LIMITS[1, :N_JOINTS] + s_joint_pos_limits) # slack is a single variable for all joints at the same time, so applying to the max joint limit basically
-        opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :N_JOINTS] - s_joint_pos_limits)
+        opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :N_JOINTS] - s_joint_pos_limits) # with slack it is always feasible, but takes longer to compute
         cost += 1e5 * s_joint_pos_limits
-        # wenn 
+        safety_margin_joint = 0.1 * (JOINT_LIMITS[1, :N_JOINTS] - JOINT_LIMITS[0, :N_JOINTS]) # 10 % of the joint limit range as safety margin
+        pos_max_dist = JOINT_LIMITS[1, :N_JOINTS] - X[:N_JOINTS, k] - safety_margin_joint
+        pos_min_dist = X[:N_JOINTS, k] - JOINT_LIMITS[0, :N_JOINTS] - safety_margin_joint
+        
+        for j in range(N_JOINTS):
+            cost += 10*(ca.exp(-pos_max_dist[j]) + ca.exp(-pos_min_dist[j])) # convex, to keep joints inside pos bounds, but only suggestion, as penalty does not go to infinity on bounds
+            # cost += -ca.log(pos_max_dist[j] + 1e-4) - ca.log(pos_min_dist[j] + 1e-4) # concave, to keep joints inside pos bounds, but only suggestion, as penalty does not go to infinity on bounds
 
         # Collision avoidance
         p_vehicle = xk[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3]
