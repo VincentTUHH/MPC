@@ -756,6 +756,8 @@ def run_mpc(
 
     return X_real, U_appl, J_hist, X_pred, U_pred
 
+#TODO: rewrite the run_mpc, that it allows for the reference to change at any time, but without initializing a new mpc, so that the initial guess is taken from the previous step always
+
 def check_fixed_point(q, nu, eta, uq, uv, ddq_in, dnu_g, quat, f_eef, l_eef):
     dnu_fp = dnu_g
     dnu_history = []
