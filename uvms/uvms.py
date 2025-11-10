@@ -76,7 +76,9 @@ G_FUN = None
 J_FUN = None
 
 # Q0 = np.array([0.1, 3*np.pi/4, np.pi/2, 0.0])  # Initial joint angles # arm down
-Q0 = np.array([np.pi, np.pi/2, 3*np.pi/4, np.pi/5])  # Initial joint angles # arm foward
+# Q0 = np.array([np.pi, np.pi/2, 3*np.pi/4, np.pi/5])  # Initial joint angles # arm foward
+# Q0 = np.array([0.8*np.pi, 0.7*np.pi/2, 0.9*3*np.pi/4, 0.6*np.pi/5])  # Initial joint angles # arm foward
+Q0 = np.array([np.pi, np.pi - 0.1, np.pi/2, 0.0])
 POS0 = np.array([1.0, 2.0, -0.7])
 ATT0_EULER = np.array([0.0, 0.0, 0.0])
 ATT0_QUAT = utils_math.euler_to_quat(ATT0_EULER[0], ATT0_EULER[1], ATT0_EULER[2])
@@ -504,6 +506,7 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
 
     # (Optional) if you’re only station-keeping, use a lean STEP that returns just x_next (and maybe dnu)
     for k in range(N_HORIZON):
+        s_joint_pos_limits = opti.variable()
         xk = X[:, k]
         uk = U[:, k]
         ddq_k = (uk[0:N_JOINTS] - u_prev[0:N_JOINTS]) / dt
@@ -540,13 +543,23 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
             opti.subject_to(U[N_JOINTS:, k] <=  1.0 - inflate)
             opti.subject_to(U[N_JOINTS:, k] >= -1.0 + inflate)
 
-        # Joint position limits constraints
+        opti.subject_to(s_joint_pos_limits >= 0)
+
+        # Joint velocity limits constraints
         opti.subject_to(U[0:N_JOINTS, k] <= JOINT_VELOCITIES[:N_JOINTS])
         opti.subject_to(U[0:N_JOINTS, k] >= (-1 * JOINT_VELOCITIES[:N_JOINTS]))
 
-        # Joint velocity limits constraints
-        opti.subject_to(X[:N_JOINTS, k] <= JOINT_LIMITS[1, :N_JOINTS])
-        opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :N_JOINTS])
+        # Joint position limits constraints
+        opti.subject_to(X[:N_JOINTS, k] <= JOINT_LIMITS[1, :N_JOINTS] + s_joint_pos_limits) # slack is a single variable for all joints at the same time, so applying to the max joint limit basically
+        opti.subject_to(X[:N_JOINTS, k] >= JOINT_LIMITS[0, :N_JOINTS] - s_joint_pos_limits) # with slack it is always feasible, but takes longer to compute
+        cost += 1e5 * s_joint_pos_limits
+        safety_margin_joint = 0.1 * (JOINT_LIMITS[1, :N_JOINTS] - JOINT_LIMITS[0, :N_JOINTS]) # 10 % of the joint limit range as safety margin
+        pos_max_dist = JOINT_LIMITS[1, :N_JOINTS] - X[:N_JOINTS, k] - safety_margin_joint
+        pos_min_dist = X[:N_JOINTS, k] - JOINT_LIMITS[0, :N_JOINTS] - safety_margin_joint
+        
+        for j in range(N_JOINTS):
+            cost += 10*(ca.exp(-pos_max_dist[j]) + ca.exp(-pos_min_dist[j])) # convex, to keep joints inside pos bounds, but only suggestion, as penalty does not go to infinity on bounds
+            # cost += -ca.log(pos_max_dist[j] + 1e-4) - ca.log(pos_min_dist[j] + 1e-4) # concave, to keep joints inside pos bounds, but only suggestion, as penalty does not go to infinity on bounds
 
         # Collision avoidance
         p_vehicle = xk[N_JOINTS+N_DOF : N_JOINTS+N_DOF+3]
@@ -563,10 +576,19 @@ def build_ocp_template(dt: float, solver: str, ipopt_opts: dict):
 
         # manipulability maximization
         manipulability_cost = CONSTRAINT_MANIPULABILITY(J_pos)
-        cost += manipulability_cost * 0.1 # weight for manipulability
+        cost += manipulability_cost * 10 # weight for manipulability
+
+        # limit vehicle inclination
+        # alpha = ca.acos(1-2*(att_vehicle[1]**2 + att_vehicle[2]**2)) # angle between vehicle z-axis and world z-axis
+        # normalize att_vehicle quaternion to unit length (safe against zero-norm)
+        # att_vehicle = att_vehicle / (ca.norm_2(att_vehicle) + 1e-8)
+        cost += 200.0 * (att_vehicle[1]**2 + att_vehicle[2]**2) # assume att_vehicle is normalized
+        # interestingly it cuts computation time in half
+
+        # push manipulator infront of vehciel = push base joint towards pi/2
+        cost += 100.0 * (ca.pi/2 - xk[0])**2
 
         #TODO. weight vehicle effort stronger than arm effort, as easier to use arm (but shouldnt the optimizer check that automatically anyways?)
-        #TODO: penalize vehicle inclination
 
         u_prev = uk
         dnu_g  = dnu_k
